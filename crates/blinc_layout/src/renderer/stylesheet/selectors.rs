@@ -62,10 +62,13 @@ impl RenderTree {
         &self,
         compound: &CompoundSelector,
         node_id: LayoutNodeId,
-        hovered: bool,
-        pressed: bool,
-        focused: bool,
+        hovered_nodes: &HashSet<LayoutNodeId>,
+        pressed_nodes: &HashSet<LayoutNodeId>,
+        focused_node: Option<LayoutNodeId>,
     ) -> bool {
+        let hovered = hovered_nodes.contains(&node_id);
+        let pressed = pressed_nodes.contains(&node_id);
+        let focused = focused_node == Some(node_id);
         for part in &compound.parts {
             match part {
                 SelectorPart::Type(type_name) => {
@@ -102,16 +105,52 @@ impl RenderTree {
                 }
                 SelectorPart::Not(inner_compound) => {
                     // :not(selector) — matches if the inner compound does NOT match
-                    if self.compound_matches(inner_compound, node_id, hovered, pressed, focused) {
+                    if self.compound_matches(
+                        inner_compound,
+                        node_id,
+                        hovered_nodes,
+                        pressed_nodes,
+                        focused_node,
+                    ) {
                         return false;
                     }
                 }
                 SelectorPart::Is(selectors) => {
                     // :is(sel1, sel2, ...) — matches if ANY inner selector matches
-                    let any_match = selectors
-                        .iter()
-                        .any(|s| self.compound_matches(s, node_id, hovered, pressed, focused));
+                    let any_match = selectors.iter().any(|s| {
+                        self.compound_matches(s, node_id, hovered_nodes, pressed_nodes, focused_node)
+                    });
                     if !any_match {
+                        return false;
+                    }
+                }
+                SelectorPart::Has(inner_selectors) => {
+                    // :has(complex, ...) — relational pseudo. Subject
+                    // matches if at least one inner relative selector
+                    // matches against the subject's descendants.
+                    //
+                    // For each inner ComplexSelector, walk the subject's
+                    // descendants and call complex_selector_matches with
+                    // each descendant as the target. Per CSS spec the
+                    // subject itself is NOT in the candidate set.
+                    //
+                    // Single-compound inners (`:has(.x:hover)`) hit the
+                    // common case the menu flicker fix relies on; the
+                    // descendant walk is `get_descendants` (DFS pre-
+                    // order) on the registry.
+                    let descendants = self.element_registry.get_descendants(node_id);
+                    let any_inner_matches = inner_selectors.iter().any(|inner| {
+                        descendants.iter().any(|&d| {
+                            self.complex_selector_matches(
+                                inner,
+                                d,
+                                hovered_nodes,
+                                pressed_nodes,
+                                focused_node,
+                            )
+                        })
+                    });
+                    if !any_inner_matches {
                         return false;
                     }
                 }
@@ -202,7 +241,8 @@ impl RenderTree {
                     | SelectorPart::State(_)
                     | SelectorPart::PseudoClass(_)
                     | SelectorPart::Not(_)
-                    | SelectorPart::Is(_) => classes += 1,
+                    | SelectorPart::Is(_)
+                    | SelectorPart::Has(_) => classes += 1,
                     SelectorPart::Type(_) => types += 1,
                     SelectorPart::Universal | SelectorPart::PseudoElement(_) => {}
                 }
@@ -231,17 +271,12 @@ impl RenderTree {
         let segments = &selector.segments;
         let (target_compound, _) = &segments[segments.len() - 1];
 
-        // Check target node against the rightmost compound
-        let target_hovered = hovered_nodes.contains(&target_node);
-        let target_pressed = pressed_nodes.contains(&target_node);
-        let target_focused = focused_node == Some(target_node);
-
         if !self.compound_matches(
             target_compound,
             target_node,
-            target_hovered,
-            target_pressed,
-            target_focused,
+            hovered_nodes,
+            pressed_nodes,
+            focused_node,
         ) {
             return false;
         }
@@ -265,16 +300,12 @@ impl RenderTree {
                         Some(p) => p,
                         None => return false,
                     };
-                    let parent_hovered = hovered_nodes.contains(&parent);
-                    let parent_pressed = pressed_nodes.contains(&parent);
-                    let parent_focused = focused_node == Some(parent);
-
                     if !self.compound_matches(
                         compound,
                         parent,
-                        parent_hovered,
-                        parent_pressed,
-                        parent_focused,
+                        hovered_nodes,
+                        pressed_nodes,
+                        focused_node,
                     ) {
                         return false;
                     }
@@ -285,16 +316,12 @@ impl RenderTree {
                     let ancestors = self.element_registry.ancestors(current_node);
                     let mut found = false;
                     for ancestor in &ancestors {
-                        let anc_hovered = hovered_nodes.contains(ancestor);
-                        let anc_pressed = pressed_nodes.contains(ancestor);
-                        let anc_focused = focused_node == Some(*ancestor);
-
                         if self.compound_matches(
                             compound,
                             *ancestor,
-                            anc_hovered,
-                            anc_pressed,
-                            anc_focused,
+                            hovered_nodes,
+                            pressed_nodes,
+                            focused_node,
                         ) {
                             current_node = *ancestor;
                             found = true;
@@ -312,16 +339,12 @@ impl RenderTree {
                             Some(s) => s,
                             None => return false,
                         };
-                    let sib_hovered = hovered_nodes.contains(&prev_sibling);
-                    let sib_pressed = pressed_nodes.contains(&prev_sibling);
-                    let sib_focused = focused_node == Some(prev_sibling);
-
                     if !self.compound_matches(
                         compound,
                         prev_sibling,
-                        sib_hovered,
-                        sib_pressed,
-                        sib_focused,
+                        hovered_nodes,
+                        pressed_nodes,
+                        focused_node,
                     ) {
                         return false;
                     }
@@ -332,16 +355,12 @@ impl RenderTree {
                     let preceding = self.element_registry.get_preceding_siblings(current_node);
                     let mut found = false;
                     for sibling in preceding.iter().rev() {
-                        let sib_hovered = hovered_nodes.contains(sibling);
-                        let sib_pressed = pressed_nodes.contains(sibling);
-                        let sib_focused = focused_node == Some(*sibling);
-
                         if self.compound_matches(
                             compound,
                             *sibling,
-                            sib_hovered,
-                            sib_pressed,
-                            sib_focused,
+                            hovered_nodes,
+                            pressed_nodes,
+                            focused_node,
                         ) {
                             current_node = *sibling;
                             found = true;
@@ -756,17 +775,12 @@ impl RenderTree {
                     let last_idx = ancestor_segments.len() - 1;
                     let (last_compound, _) = &ancestor_segments[last_idx];
 
-                    // Check if the SVG node matches the last ancestor compound
-                    let svg_hovered = hovered_nodes.contains(&svg_node);
-                    let svg_pressed = pressed_nodes.contains(&svg_node);
-                    let svg_focused = focused_node == Some(svg_node);
-
                     if !self.compound_matches(
                         last_compound,
                         svg_node,
-                        svg_hovered,
-                        svg_pressed,
-                        svg_focused,
+                        &hovered_nodes,
+                        &pressed_nodes,
+                        focused_node,
                     ) {
                         false
                     } else if ancestor_segments.len() == 1 {
@@ -789,11 +803,13 @@ impl RenderTree {
                                                 break;
                                             }
                                         };
-                                    let p_hov = hovered_nodes.contains(&parent);
-                                    let p_prs = pressed_nodes.contains(&parent);
-                                    let p_foc = focused_node == Some(parent);
-                                    if !self.compound_matches(compound, parent, p_hov, p_prs, p_foc)
-                                    {
+                                    if !self.compound_matches(
+                                        compound,
+                                        parent,
+                                        &hovered_nodes,
+                                        &pressed_nodes,
+                                        focused_node,
+                                    ) {
                                         all_matched = false;
                                         break;
                                     }
@@ -803,11 +819,12 @@ impl RenderTree {
                                     let ancestors = self.element_registry.ancestors(current_node);
                                     let mut found = false;
                                     for ancestor in &ancestors {
-                                        let a_hov = hovered_nodes.contains(ancestor);
-                                        let a_prs = pressed_nodes.contains(ancestor);
-                                        let a_foc = focused_node == Some(*ancestor);
                                         if self.compound_matches(
-                                            compound, *ancestor, a_hov, a_prs, a_foc,
+                                            compound,
+                                            *ancestor,
+                                            &hovered_nodes,
+                                            &pressed_nodes,
+                                            focused_node,
                                         ) {
                                             current_node = *ancestor;
                                             found = true;

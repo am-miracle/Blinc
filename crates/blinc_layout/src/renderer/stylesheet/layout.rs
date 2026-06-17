@@ -477,7 +477,19 @@ impl RenderTree {
                     } else {
                         let last_idx = ancestor_segments.len() - 1;
                         let (last_compound, _) = &ancestor_segments[last_idx];
-                        if !self.compound_matches(last_compound, svg_node, false, false, false) {
+                        // Layout-pass style application is state-agnostic
+                        // — :hover / :has() inside selectors should NOT
+                        // match here. Pass empty sets / None for the
+                        // interaction state.
+                        let empty: std::collections::HashSet<crate::tree::LayoutNodeId> =
+                            std::collections::HashSet::new();
+                        if !self.compound_matches(
+                            last_compound,
+                            svg_node,
+                            &empty,
+                            &empty,
+                            None,
+                        ) {
                             false
                         } else if ancestor_segments.len() == 1 {
                             true
@@ -493,7 +505,7 @@ impl RenderTree {
                                         match self.element_registry.get_parent(current_node) {
                                             Some(parent) => {
                                                 if !self.compound_matches(
-                                                    compound, parent, false, false, false,
+                                                    compound, parent, &empty, &empty, None,
                                                 ) {
                                                     all_matched = false;
                                                     break;
@@ -512,7 +524,7 @@ impl RenderTree {
                                         let mut found = false;
                                         for ancestor in &ancestors {
                                             if self.compound_matches(
-                                                compound, *ancestor, false, false, false,
+                                                compound, *ancestor, &empty, &empty, None,
                                             ) {
                                                 current_node = *ancestor;
                                                 found = true;

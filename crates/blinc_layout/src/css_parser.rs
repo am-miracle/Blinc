@@ -579,6 +579,12 @@ pub enum SelectorPart {
     Not(Box<CompoundSelector>),
     /// :is(selector, ...) / :where(selector, ...) — matches if any inner selector matches
     Is(Vec<CompoundSelector>),
+    /// :has(selector, ...) — relational selector. Matches when ANY listed
+    /// relative selector matches against the subject's descendants /
+    /// children / siblings. Unlike :is, the inner is a full
+    /// `ComplexSelector` because :has natively supports combinators
+    /// (e.g. `:has(> .child)`, `:has(+ .sibling)`, `:has(.deep .nested)`).
+    Has(Vec<ComplexSelector>),
     /// ::placeholder, ::selection, etc. — pseudo-elements
     PseudoElement(String),
 }
@@ -2472,6 +2478,48 @@ fn parse_selector_list(input: &str) -> Vec<CompoundSelector> {
     selectors
 }
 
+/// Like `parse_selector_list` but the inner items can contain
+/// combinators (`>`, `+`, `~`, descendant whitespace), so each
+/// element parses as a `ComplexSelector` instead of a single
+/// `CompoundSelector`. Used for the inside of `:has(...)`.
+///
+/// Splits on TOP-LEVEL commas only — commas inside nested
+/// parens (e.g. `:has(.a, :is(.b, .c))`) are preserved. Empty
+/// items are skipped.
+fn parse_relative_selector_list(input: &str) -> Vec<ComplexSelector> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    for ch in input.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    parts.push(current);
+
+    let mut selectors = Vec::new();
+    for part in parts {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            if let Ok((_, complex)) = parse_complex_selector(trimmed) {
+                selectors.push(complex);
+            }
+        }
+    }
+    selectors
+}
+
 fn parse_compound_selector(input: &str) -> ParseResult<CompoundSelector> {
     let mut parts = Vec::new();
     let mut remaining = input;
@@ -2621,6 +2669,30 @@ fn parse_compound_selector(input: &str) -> ParseResult<CompoundSelector> {
                         remaining = rest;
                     }
                 }
+                "has" => {
+                    // Parse :has(relative_selector, ...) — relational
+                    // pseudo. Unlike :is/:where the inner items can carry
+                    // combinators (`> .child`, `+ .sibling`, `~ .later`,
+                    // or descendant whitespace), so the inner is a
+                    // `ComplexSelector` list, not a `CompoundSelector`
+                    // list. Empty parens or unparseable inner → silently
+                    // drop the :has (rule still applies to the bare
+                    // compound part before it, same as :is's fallback).
+                    if rest.starts_with('(') {
+                        if let Some(close) = find_matching_paren(rest) {
+                            let inner = &rest[1..close];
+                            let selectors = parse_relative_selector_list(inner);
+                            if !selectors.is_empty() {
+                                parts.push(SelectorPart::Has(selectors));
+                            }
+                            remaining = &rest[close + 1..];
+                        } else {
+                            remaining = rest;
+                        }
+                    } else {
+                        remaining = rest;
+                    }
+                }
                 "first-of-type" => {
                     parts.push(SelectorPart::PseudoClass(StructuralPseudo::FirstOfType));
                     remaining = rest;
@@ -2676,7 +2748,23 @@ fn parse_compound_selector(input: &str) -> ParseResult<CompoundSelector> {
                     if let Some(state) = ElementState::parse_state(name) {
                         parts.push(SelectorPart::State(state));
                     }
-                    remaining = rest;
+                    // Skip any functional argument list `(...)` so an
+                    // unknown pseudo like `:unknown(.x)` doesn't leak its
+                    // open-paren into the rest of the selector, which
+                    // would later poison `rule_block` and (via the
+                    // stylesheet loop's break-on-error recovery) drop
+                    // every rule after the offending one. Same hardening
+                    // approach as :is/:has — consume the balanced parens
+                    // even though we have no semantic for them.
+                    if rest.starts_with('(') {
+                        if let Some(close) = find_matching_paren(rest) {
+                            remaining = &rest[close + 1..];
+                        } else {
+                            remaining = rest;
+                        }
+                    } else {
+                        remaining = rest;
+                    }
                 }
             }
         } else {
@@ -4439,7 +4527,28 @@ fn parse_stylesheet_with_errors<'a>(
                 remaining = rest;
             }
             Err(nom::Err::Error(_)) | Err(nom::Err::Failure(_)) => {
-                // Can't parse more rules, break
+                // Rule failed to parse — skip past its `{ ... }` block
+                // (or to the next `;` for at-rule-style declarations) and
+                // continue with the next rule instead of breaking. Before
+                // this recovery a single bad selector (e.g. an unknown
+                // pseudo whose parser leaked `(...)` into rule_block's
+                // expected `{`) silently dropped EVERY subsequent rule
+                // in the stylesheet.
+                if let Some(skip) = skip_failed_rule(trimmed) {
+                    // `trimmed` may sit at a different offset than
+                    // `remaining` (we trimmed leading whitespace earlier
+                    // in the loop). Recompute the corresponding offset
+                    // in `remaining` by finding the trimmed slice's
+                    // start position via pointer arithmetic.
+                    let trim_offset = trimmed.as_ptr() as usize - remaining.as_ptr() as usize;
+                    let skip_offset = trim_offset + skip;
+                    if skip_offset < remaining.len() {
+                        remaining = &remaining[skip_offset..];
+                        continue;
+                    }
+                    break;
+                }
+                // No recovery point found — bail.
                 break;
             }
             Err(nom::Err::Incomplete(_)) => {
@@ -4459,6 +4568,47 @@ fn parse_stylesheet_with_errors<'a>(
             flows: parsed_flows,
         },
     ))
+}
+
+/// Recovery helper for the stylesheet loop: when a rule fails to
+/// parse, find the byte offset where the NEXT rule probably starts
+/// so we can skip the bad block and keep parsing instead of breaking
+/// the entire stylesheet at the first failure.
+///
+/// Strategy:
+///   1. Scan for the matching `}` of the current rule's body, tracking
+///      paren nesting so `}` inside `:has(...)` or attribute selectors
+///      doesn't get mistaken for the rule terminator. Return one past
+///      the closing brace.
+///   2. If no `{` appears at all (the failure was inside the selector
+///      with no following block), advance past the next `;` or whole
+///      input to skip the malformed fragment.
+fn skip_failed_rule(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut paren_depth: i32 = 0;
+    let mut brace_depth: i32 = 0;
+    let mut saw_brace = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = (paren_depth - 1).max(0),
+            b'{' if paren_depth == 0 => {
+                brace_depth += 1;
+                saw_brace = true;
+            }
+            b'}' if paren_depth == 0 => {
+                brace_depth -= 1;
+                if saw_brace && brace_depth <= 0 {
+                    return Some(i + 1);
+                }
+            }
+            b';' if paren_depth == 0 && !saw_brace => {
+                return Some(i + 1);
+            }
+            _ => {}
+        }
+    }
+    if input.is_empty() { None } else { Some(input.len()) }
 }
 
 /// Result of parsing a CSS rule — either a simple #id rule or a complex selector rule
@@ -4567,13 +4717,14 @@ fn try_as_simple_selector(compound: &CompoundSelector) -> Option<String> {
                 }
                 pseudo_element = Some(name.as_str());
             }
-            // If there are type selectors, classes, structural pseudos, universal, :not(), or :is(), it's not simple
+            // If there are type selectors, classes, structural pseudos, universal, :not(), :is(), or :has(), it's not simple
             SelectorPart::Type(_)
             | SelectorPart::Class(_)
             | SelectorPart::PseudoClass(_)
             | SelectorPart::Universal
             | SelectorPart::Not(_)
-            | SelectorPart::Is(_) => return None,
+            | SelectorPart::Is(_)
+            | SelectorPart::Has(_) => return None,
         }
     }
 

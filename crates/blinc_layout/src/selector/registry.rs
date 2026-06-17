@@ -269,6 +269,58 @@ impl ElementRegistry {
         }
     }
 
+    /// All following siblings of a node (used by `:has(~ x)` /
+    /// `:has(+ x)`). Returns siblings in order from the one
+    /// immediately AFTER this node through to the last child of
+    /// the shared parent.
+    pub fn get_following_siblings(&self, node_id: LayoutNodeId) -> Vec<LayoutNodeId> {
+        let parent = match self.get_parent(node_id) {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        let index = match self.get_child_index(node_id) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let children = match self.children.read().ok() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        match children.get(&parent) {
+            Some(siblings) if index + 1 < siblings.len() => siblings[index + 1..].to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Direct children of a node (used by `:has(> x)`). Returns a
+    /// clone of the ordered children vec; empty if the node has no
+    /// registered children.
+    pub fn get_children(&self, node_id: LayoutNodeId) -> Vec<LayoutNodeId> {
+        self.children
+            .read()
+            .ok()
+            .and_then(|c| c.get(&node_id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// All descendants of a node in pre-order traversal (used by
+    /// `:has(x)` with no leading combinator — the default
+    /// descendant relationship). Walks the registered children
+    /// recursively.
+    pub fn get_descendants(&self, node_id: LayoutNodeId) -> Vec<LayoutNodeId> {
+        let mut out = Vec::new();
+        let mut stack: Vec<LayoutNodeId> = self.get_children(node_id);
+        while let Some(n) = stack.pop() {
+            out.push(n);
+            let kids = self.get_children(n);
+            // Push in reverse so iteration retains DFS pre-order.
+            for c in kids.into_iter().rev() {
+                stack.push(c);
+            }
+        }
+        out
+    }
+
     /// Look up a node ID by string ID
     pub fn get(&self, id: &str) -> Option<LayoutNodeId> {
         self.ids.read().ok()?.get(id).copied()

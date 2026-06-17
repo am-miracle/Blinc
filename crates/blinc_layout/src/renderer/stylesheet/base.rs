@@ -177,7 +177,20 @@ impl RenderTree {
                         // Check if ancestor segments match the SVG node's chain
                         let last_idx = ancestor_segments.len() - 1;
                         let (last_compound, _) = &ancestor_segments[last_idx];
-                        if !self.compound_matches(last_compound, svg_node, false, false, false) {
+                        // Base-style application is state-agnostic — no
+                        // hover/press/focus interaction here. Pass empty
+                        // sets so :hover / :has() inside don't accidentally
+                        // match. `STATE` is reused across all branches so
+                        // we don't repeat the empty-set construction.
+                        let empty: std::collections::HashSet<crate::tree::LayoutNodeId> =
+                            std::collections::HashSet::new();
+                        if !self.compound_matches(
+                            last_compound,
+                            svg_node,
+                            &empty,
+                            &empty,
+                            None,
+                        ) {
                             false
                         } else if ancestor_segments.len() == 1 {
                             true
@@ -193,7 +206,7 @@ impl RenderTree {
                                         match self.element_registry.get_parent(current_node) {
                                             Some(parent) => {
                                                 if !self.compound_matches(
-                                                    compound, parent, false, false, false,
+                                                    compound, parent, &empty, &empty, None,
                                                 ) {
                                                     all_matched = false;
                                                     break;
@@ -212,7 +225,7 @@ impl RenderTree {
                                         let mut found = false;
                                         for ancestor in &ancestors {
                                             if self.compound_matches(
-                                                compound, *ancestor, false, false, false,
+                                                compound, *ancestor, &empty, &empty, None,
                                             ) {
                                                 current_node = *ancestor;
                                                 found = true;
