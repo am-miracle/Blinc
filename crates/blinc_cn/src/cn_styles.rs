@@ -1038,7 +1038,7 @@ pub const CN_STYLES: &str = r#"
     background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
-    /* CSS-driven enter — small scale + fade. Motion FSM workaround. */
+    /* CSS-driven enter — small scale + fade. */
     animation: cn-context-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top left;
 }
@@ -1046,6 +1046,21 @@ pub const CN_STYLES: &str = r#"
 @keyframes cn-context-menu-enter {
     from { opacity: 0; transform: scale(0.96) translateY(-2px); }
     to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Belt-and-braces marker for "parent menu should not re-enter when a
+   submenu is hovered". The real fix lives in
+   `RenderTree::sweep_stale_css_animations` — the parent menu's
+   ActiveCssAnimation now survives the OverlayStack-driven Structural
+   rebuild because the wrapper's stable id is re-minted unchanged, so
+   `start_all_css_animations`' contains_key gate suppresses the
+   restart. This `:has()` rule does not actively stop a running
+   animation (state-style passes don't reach into css_anim_store) but
+   documents the intent and would no-op a fresh start if any future
+   rebuild path bypasses the sweep. */
+.cn-context-menu:has(.cn-context-menu-item--has-submenu:hover) {
+    background: var(--surface-elevated);
+    animation: none;
 }
 .cn-context-menu-item {
     padding: var(--space-2) var(--space-3);
@@ -1095,6 +1110,14 @@ pub const CN_STYLES: &str = r#"
     /* Reuse the dropdown keyframes — same top-anchored slide/fade. */
     animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top center;
+}
+/* Belt-and-braces — same as `.cn-context-menu:has(...)`. Real
+   suppression now lives in `RenderTree::sweep_stale_css_animations`,
+   which keeps the parent panel's ActiveCssAnimation alive across the
+   submenu's OverlayStack-driven Structural rebuild so the enter
+   keyframe never restarts. */
+.cn-menubar-content:has(.cn-menubar-item--has-submenu:hover) {
+    animation: none;
 }
 .cn-menubar-item {
     /* Match `.cn-dropdown-item` / `.cn-context-menu-item` so all three

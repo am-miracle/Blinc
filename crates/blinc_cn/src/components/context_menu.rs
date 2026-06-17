@@ -468,6 +468,26 @@ impl SubmenuBuilder {
         self
     }
 
+    /// Add a menu item with a leading SVG icon. Mirror of
+    /// [`ContextMenuBuilder::item_with_icon`] — submenus support
+    /// icons too; this just exposes the builder ergonomic for them.
+    pub fn item_with_icon<F>(
+        mut self,
+        label: impl Into<String>,
+        icon_svg: impl Into<String>,
+        on_click: F,
+    ) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.items.push(
+            ContextMenuItem::new(label)
+                .icon(icon_svg)
+                .on_click(on_click),
+        );
+        self
+    }
+
     /// Add a disabled menu item
     pub fn item_disabled(mut self, label: impl Into<String>) -> Self {
         self.items.push(ContextMenuItem::new(label).disabled());
@@ -632,7 +652,13 @@ fn build_menu_content(
         .class("cn-context-menu")
         .id(self_id)
         .flex_col()
-        .w(width)
+        // `min_w(width).w_fit()` so the menu honours the configured
+        // minimum width but grows to fit longer labels instead of
+        // forcing them to wrap. Fixed `.w(width)` (the prior code)
+        // clipped labels like "Auto-layout: force-directed" mid-
+        // word once the text + icon + shortcut exceeded `width`.
+        .min_w(width)
+        .w_fit()
         .bg(bg)
         .border(1.0, border)
         .rounded(radius)
@@ -640,6 +666,9 @@ fn build_menu_content(
         .shadow_lg()
         .overflow_clip()
         .h_fit();
+    // (Enter animation lives on the base `.cn-context-menu` class
+    // again — suppressed via CSS `:has()` rule when a submenu
+    // trigger is hovered. See cn_styles.rs.)
 
     for (idx, item) in items.iter().enumerate() {
         if item.is_separator {
@@ -692,6 +721,13 @@ fn build_menu_content(
                     text(&item_label)
                         .size(font_size)
                         .color(item_text_color)
+                        // `no_wrap` so the menu container grows
+                        // horizontally to fit long labels instead of
+                        // wrapping the text into multiple lines (which
+                        // looked clipped + uneven, e.g. the "Auto-
+                        // layout: force-directed" item dropping the
+                        // final word).
+                        .no_wrap()
                         .no_cursor()
                         .pointer_events_none(),
                 )
@@ -723,7 +759,16 @@ fn build_menu_content(
                 .w_full()
                 .h_fit()
                 .py(padding / 4.0)
-                .px(padding / 2.0)
+                .px(padding / 2.0);
+            if has_submenu {
+                // CSS hook: `.cn-context-menu:has(.cn-context-menu-item--has-submenu:hover)`
+                // suppresses the parent menu's enter animation when
+                // the user hovers a submenu-trigger item (so the
+                // parent doesn't flicker each time the user moves
+                // between sibling submenu items).
+                row_content = row_content.class("cn-context-menu-item--has-submenu");
+            }
+            row_content = row_content
                 .cursor(if item_disabled {
                     CursorStyle::NotAllowed
                 } else {

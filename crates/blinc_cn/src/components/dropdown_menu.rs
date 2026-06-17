@@ -779,7 +779,14 @@ fn build_dropdown_menu_div(
                 .w_full()
                 .h_fit()
                 .py(padding / 4.0)
-                .px(padding / 2.0)
+                .px(padding / 2.0);
+            if has_submenu {
+                // CSS hook for the panel's `:has()` flicker
+                // suppression rule. See cn_styles.rs's
+                // `.cn-dropdown-menu:has(.cn-dropdown-item--has-submenu:hover)`.
+                row_content = row_content.class("cn-dropdown-item--has-submenu");
+            }
+            row_content = row_content
                 .cursor(if item_disabled {
                     CursorStyle::NotAllowed
                 } else {

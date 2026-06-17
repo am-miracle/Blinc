@@ -909,7 +909,14 @@ fn build_menubar_menu_div(
                 .h_fit()
                 .py(padding / 4.0)
                 .px(padding / 2.0)
-                .cursor(cursor)
+                .cursor(cursor);
+            if has_submenu {
+                // CSS hook for the panel's `:has()` flicker
+                // suppression rule. See cn_styles.rs's
+                // `.cn-menubar-content:has(.cn-menubar-item--has-submenu:hover)`.
+                row = row.class("cn-menubar-item--has-submenu");
+            }
+            row = row
                 .on_click(move |_| {
                     if !item_disabled && !has_submenu {
                         // Close root FIRST so `cb()`-pushed overlays (e.g.
