@@ -23,7 +23,7 @@ default = []
 
 # Canvas + GPU primitives (canvas_kit_demo, mesh_3d_demo, and the
 # 3D-pipeline base used by every glTF demo).
-canvas = ["dep:blinc_canvas_kit", "dep:blinc_input"]
+canvas = ["dep:blinc_canvas_kit"]
 
 # Audio + video playback. Enables the `media` widgets in
 # `blinc_layout` (which themselves pull `blinc_media`).
@@ -45,7 +45,7 @@ icons = ["dep:blinc_icons"]
 
 # glTF model loading + skeletal animation. Implies `canvas` because
 # every glTF demo renders through canvas_kit's 3D pipeline.
-gltf = ["canvas", "dep:blinc_gltf", "dep:blinc_skeleton", "dep:blinc_input"]
+gltf = ["canvas", "dep:blinc_gltf", "dep:blinc_skeleton"]
 
 # Experimental hot-reload — forwards to `blinc_app/hot-reload`.
 # Run examples under `dx serve --hotpatch` (see
@@ -88,12 +88,14 @@ blinc_media = { path = "../../crates/blinc_media", optional = true }
 # uses the real git revs.
 #
 # `blinc_canvas_kit` joined this set after issue #28 — when it lived
-# in `crates/`, every workspace resolution pulled its non-optional
-# `blinc_input` dep, which forced the patch table to validate
-# `packages/blinc_input/Cargo.toml` and broke fresh checkouts that
-# didn't have `/packages/`. Moving it out of the workspace means the
-# whole 3D / glTF stack is opt-in via the `canvas` and `gltf`
-# features below; default builds don't touch any of these git URLs.
+# in `crates/`, every workspace resolution pulled its
+# (then-separate) `blinc_input` dep, which forced the patch table
+# to validate `packages/blinc_input/Cargo.toml` and broke fresh
+# checkouts that didn't have `/packages/`. Moving canvas_kit out of
+# the workspace means the whole 3D / glTF stack is opt-in via the
+# `canvas` and `gltf` features below; default builds don't touch
+# any of these git URLs. `blinc_input` was later absorbed into
+# `canvas_kit` directly so the standalone crate no longer exists.
 # LOCAL-DEV OVERRIDE — `blinc_canvas_kit` is path-dep'd directly so
 # it shares a single source-id with the `packages/blinc_node_editor`
 # crate's own path dep. The workspace `[patch]` redirect for the
@@ -117,9 +119,8 @@ blinc_node_editor = { path = "../../packages/blinc_node_editor", optional = true
 # Immediate-mode widget toolkit used by node-editor's `with_content`
 # closures. Gated behind the same `node-editor` feature.
 blinc_portal_ui = { path = "../../packages/blinc_portal_ui", optional = true }
-blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "e510f26f627b9e7a3c4455e889a041940a530975", features = ["platform-assets", "bc-encode"], optional = true }
-blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "33d4fbd9655fe4cfd38d8e18004c978d020ed6e2", optional = true }
-blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5", optional = true }
+blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "1c1e7105bec95faa4e9f13cb25d2548113149b14", features = ["platform-assets", "bc-encode"], optional = true }
+blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "4cd786055f0b4649b23b96934778c2fad8ac8d65", optional = true }
 
 image.workspace = true
 tracing.workspace = true
