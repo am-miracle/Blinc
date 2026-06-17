@@ -776,6 +776,14 @@ fn build_menu_content(
                 })
                 .flex_row()
                 .items_center()
+                // Minimum horizontal gap between the label and the
+                // shortcut / chevron. `justify_between()` alone leaves
+                // them touching when the menu container sizes itself
+                // to the row's natural width (no spare room to
+                // distribute), so "Redo" + "Ctrl + Shift + Z" was
+                // rendering as "RedoCtrl + Shift + Z". A 2× padding
+                // step looks balanced against the row's own padding.
+                .gap(padding)
                 .justify_between()
                 .child(left_side);
 

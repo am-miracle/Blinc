@@ -1063,7 +1063,13 @@ pub const CN_STYLES: &str = r#"
     animation: none;
 }
 .cn-context-menu-item {
-    padding: var(--space-2) var(--space-3);
+    /* `space-1-5 / space-3` (~6×12) gives a tighter row height that
+       matches `.cn-menubar-trigger`. The earlier `space-2` (8px
+       vertical) left items reading taller than the surrounding
+       menubar / dropdown chrome — reducing to space-1-5 lines them
+       up. Horizontal padding stays at space-3 so the row chrome's
+       hit area extends comfortably past the label edge. */
+    padding: var(--space-1-5) var(--space-3);
     /* No `border-radius` — see `.cn-select-item`. */
     cursor: pointer;
     color: var(--text-primary);
