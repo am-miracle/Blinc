@@ -107,9 +107,9 @@ blinc_media = { path = "../../crates/blinc_media", optional = true }
 # validates path-dep manifests at resolve time even when the dep
 # is optional + gated, and the gitignored `/packages/` directory
 # isn't present.
-blinc_canvas_kit = { git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "8347d7d97d3932da7bb80b28ca8eec1f9a01679f", optional = true }
-blinc_node_editor = { git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "3b9530065485ea60fbc0fce2bc212f691ce9650f", optional = true }
-blinc_portal_ui = { git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "d8f1f760eb058fdbf822ba16ecee9e23c0c0a066", optional = true }
+blinc_canvas_kit = { git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "da0d0540b82a0dc940351abf957a0499f4e9da11", optional = true }
+blinc_node_editor = { git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "aae8a97e5271952526f701aae48bdd75d42a556b", optional = true }
+blinc_portal_ui = { git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "3fe946fd1ae42d3755a8caf48493c005b33ce3f9", optional = true }
 blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "1c1e7105bec95faa4e9f13cb25d2548113149b14", features = ["platform-assets", "bc-encode"], optional = true }
 blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "4cd786055f0b4649b23b96934778c2fad8ac8d65", optional = true }
 
