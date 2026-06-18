@@ -190,6 +190,114 @@ struct PortalSignals {
     formatter_decimals: blinc_core::reactive::Signal<f32>,
 }
 
+/// Open the colour-wheel popover anchored under the trigger chip.
+/// Wraps `blinc_portal_ui::color_wheel_panel` in popover chrome
+/// (bg + border + radius + padding + shadow_lg) plus a hex input
+/// for typed entry and a "Done" button to confirm. Dismisses on
+/// click outside; the wheel still reads/writes the same hex
+/// signal so the trigger chip swatch reflects drags in real time.
+fn open_color_picker_popover(
+    anchor: blinc_core::layer::Rect,
+    hex_signal: blinc_core::reactive::Signal<String>,
+) {
+    use blinc_core::layer::Color;
+    use blinc_layout::overlay_state::overlay_stack;
+    use blinc_layout::widgets::overlay::AnchorDirection;
+    use blinc_layout::widgets::overlay_stack::OverlayBuilder;
+    use blinc_layout::widgets::text_input::text_input_data_with_placeholder;
+    use blinc_layout::{click_outside, div};
+
+    // Reserve the next handle id so the content closure can stamp
+    // the same string on the wrapping div (click_outside hit-tests
+    // ancestor element ids). Mirrors `cn::popover`'s build_popover_overlay.
+    let next_id = overlay_stack()
+        .lock()
+        .ok()
+        .map(|s| s.peek_next_handle_id())
+        .unwrap_or(0);
+    let popover_id = format!("portal-color-picker-{}", next_id);
+    let click_outside_key = format!("portal-color-picker:{}", next_id);
+    let popover_id_for_content = popover_id.clone();
+    let key_for_on_close = click_outside_key.clone();
+
+    // Hex input — seeded with the current hex once; on_change parses
+    // and writes back to the bound signal. Bidirectional sync with
+    // wheel drags isn't wired (would require re-pushing the value
+    // into the SharedTextInputData every frame, which fights focus /
+    // caret state); users typing here see immediate effect, wheel
+    // drags don't refresh the input until the popover re-opens.
+    let hex_data = text_input_data_with_placeholder("#rrggbb");
+    {
+        let mut d = hex_data.lock().unwrap();
+        d.value = hex_signal.get();
+        d.cursor = d.value.len();
+    }
+    let hex_signal_on_change = hex_signal.clone();
+    let hex_data_on_change = hex_data.clone();
+
+    let handle = OverlayBuilder::popover()
+        .at(anchor.x(), anchor.y() + anchor.height() + 4.0)
+        .anchor_direction(AnchorDirection::Bottom)
+        .on_close(move |_reason| {
+            click_outside::unregister_click_outside(&key_for_on_close);
+        })
+        .content(move || {
+            let bg = blinc_theme::ThemeState::get().color(ColorToken::SurfaceElevated);
+            let border = blinc_theme::ThemeState::get().color(ColorToken::Border);
+            let hex_for_input = hex_data_on_change.clone();
+            let hex_signal_for_change = hex_signal_on_change.clone();
+            div()
+                .id(&popover_id_for_content)
+                .flex_col()
+                .gap(10.0)
+                .bg(bg)
+                .border(1.0, border)
+                .rounded(8.0)
+                .lock_corner_shape()
+                .p_px(12.0)
+                .shadow_lg()
+                .child(blinc_portal_ui::color_wheel_panel(hex_signal.clone()))
+                .child(
+                    blinc_cn::input(&hex_for_input)
+                        .placeholder("#rrggbb")
+                        .on_change(move |new_val: &str| {
+                            if let Some(c) = Color::from_hex_str(new_val) {
+                                hex_signal_for_change.set(c.to_hex_string(c.a < 1.0));
+                            }
+                        }),
+                )
+                .child(
+                    div().w_full().flex_row().justify_end().child(
+                        blinc_cn::button("Done").on_click(move |_| {
+                            // Close the overlay via its stable handle
+                            // id. The popover's `on_close` callback
+                            // runs once on close and unregisters the
+                            // click_outside entry, so we don't double-
+                            // unregister here.
+                            if let Ok(mut stack) = overlay_stack().lock() {
+                                stack.close(blinc_layout::widgets::overlay_stack::OverlayHandle::from_raw(next_id));
+                            }
+                        }),
+                    ),
+                )
+        })
+        .show();
+
+    debug_assert_eq!(
+        handle.raw(),
+        next_id,
+        "peek_next_handle_id was stale — concurrent push?"
+    );
+
+    // Register click_outside AFTER show() so the popover content has
+    // its id mounted on the next frame's tree walk. Hit-tests against
+    // ancestor element ids; any mouse-down whose ancestor chain
+    // doesn't include `popover_id` triggers the dismiss.
+    click_outside::register_click_outside(&click_outside_key, &popover_id, move || {
+        handle.close();
+    });
+}
+
 fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
     let source = NodeTemplate::<DemoPort>::new("source", "Source")
         .with_category("data")
@@ -429,26 +537,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             let color_resp = ui.color_picker(&sigs.sink_fill).show();
             if color_resp.clicked {
                 let anchor = ui.host().rect_to_screen(color_resp.rect);
-                let fill = sigs.sink_fill.clone();
-                let _ = blinc_layout::widgets::overlay_stack::OverlayBuilder::popover()
-                    .at(anchor.x(), anchor.y() + anchor.height() + 4.0)
-                    .anchor_direction(blinc_layout::widgets::overlay::AnchorDirection::Bottom)
-                    .content(move || {
-                        let f = fill.clone();
-                        blinc_layout::div()
-                            .bg(blinc_theme::ThemeState::get()
-                                .color(blinc_theme::ColorToken::SurfaceElevated))
-                            .border(
-                                1.0,
-                                blinc_theme::ThemeState::get()
-                                    .color(blinc_theme::ColorToken::Border),
-                            )
-                            .rounded(8.0)
-                            .p_px(12.0)
-                            .shadow_lg()
-                            .child(blinc_portal_ui::color_wheel_panel(f.clone()))
-                    })
-                    .show();
+                open_color_picker_popover(anchor, sigs.sink_fill.clone());
             }
         });
 
