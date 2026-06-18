@@ -35,7 +35,7 @@ use blinc_node_editor::{
     LayoutOrientation, LayoutStrategy, StatusBadge,
 };
 use blinc_platform::AnimationFps;
-use blinc_portal_ui::Sense;
+use blinc_portal_ui::{Sense, ShadowMix};
 use blinc_tabler_icons::outline;
 use blinc_theme::{
     ThemeState, detect_system_color_scheme, themes::universal::HybridTheme, tokens::ColorToken,
@@ -152,12 +152,29 @@ fn signals() -> &'static PortalSignals {
     S.get_or_init(|| PortalSignals {
         threshold: blinc_core::reactive::signal::<f32>(0.5),
         running: blinc_core::reactive::signal::<bool>(false),
+        sink_format: blinc_core::reactive::signal::<String>("text".to_string()),
+        sink_clears: blinc_core::reactive::signal::<u32>(0),
+        sink_label: blinc_core::reactive::signal::<String>("Output".to_string()),
     })
 }
 
 struct PortalSignals {
     threshold: blinc_core::reactive::Signal<f32>,
     running: blinc_core::reactive::Signal<bool>,
+    /// Display format for the Sink node — one of `text` / `json` /
+    /// `yaml`. The Sink node's portal content slot renders a
+    /// `select_trigger`; clicking opens a `cn::context_menu` and the
+    /// menu items write the chosen value back here.
+    sink_format: blinc_core::reactive::Signal<String>,
+    /// Click counter for the Sink node's "Clear" button. Bumps once
+    /// per click — exists purely to prove the button click round-trip
+    /// (paint → hit → consume-on-read → Response.clicked).
+    sink_clears: blinc_core::reactive::Signal<u32>,
+    /// User-editable label on the Sink node — drives the inline
+    /// `text_input` widget. Exercises portal_ui's typed-character
+    /// path end-to-end (canvas-kit on_key_down + on_text_input →
+    /// install_kbd_hook → text_input edit handler → signal write).
+    sink_label: blinc_core::reactive::Signal<String>,
 }
 
 fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
@@ -228,14 +245,23 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 })
                 .set("strict", JsonValue::Bool(true)),
         )
-        // Portal content slot — 80px of immediate-mode UI under the
-        // header. The slider edits the shared `threshold` signal;
-        // any frame mutating it from anywhere repaints the canvas
-        // via the portal-ui notifier hook.
-        .with_content(80.0, |_node_id, ui| {
+        // Portal content slot — immediate-mode UI under the header.
+        // The slider edits the shared `threshold` signal; any frame
+        // mutating it from anywhere repaints the canvas via the
+        // portal-ui notifier hook. The Reset button uses the Ghost
+        // variant — appropriate for a low-emphasis toolbar action
+        // that sits next to the live slider.
+        .with_content(110.0, |_node_id, ui| {
             let sigs = signals();
             ui.label(&format!("threshold = {:.2}", sigs.threshold.get()));
-            ui.slider_signal(&sigs.threshold, 0.0..1.0);
+            ui.slider(&sigs.threshold, 0.0..1.0).show();
+            // Outline variant — the chevron-less Ghost fill made it
+            // hard to spot as a button; Outline keeps the same low-
+            // chroma palette but adds a 1px border so the affordance
+            // reads clearly on the node body.
+            if ui.button("Reset").outline().shadow_sm().clicked() {
+                sigs.threshold.set(0.5);
+            }
         });
 
     let formatter = NodeTemplate::<DemoPort>::new("formatter", "Formatter")
@@ -280,7 +306,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             ui.label(&format!("Mirrors threshold: {:.2}", sigs.threshold.get()));
             ui.horizontal(|ui| {
                 ui.label("running");
-                ui.switch_signal(&sigs.running);
+                ui.switch(&sigs.running).show();
             });
             ui.label(if sigs.running.get() {
                 "● live"
@@ -326,7 +352,54 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         .with_input(
             PortDesc::new("in_str", "label", Direction::Input, DemoPort::String)
                 .with_description("Text payload to render in the sink view"),
-        );
+        )
+        // Portal content slot — exercises the button + select_trigger
+        // widgets end-to-end. Click on "Clear" bumps `sink_clears`
+        // so the label below updates (proves Response.clicked round-
+        // trips). Clicking the format trigger opens a host overlay
+        // (`blinc_cn::context_menu`) anchored against the trigger's
+        // canvas-space rect via `ui.host().rect_to_screen`.
+        .with_content(160.0, |_node_id, ui| {
+            let sigs = signals();
+            // Inline editable label — clicks set focus, typing edits.
+            ui.label("label:");
+            ui.text_input(&sigs.sink_label)
+                .placeholder("Label…")
+                .show();
+
+            let count = sigs.sink_clears.get();
+            ui.label(&format!("cleared: {count}"));
+            // Destructive variant — Clear is an irreversible action
+            // (resets the accumulator). cn::button uses Destructive
+            // for the same intent class; portal_ui mirrors that.
+            // Default Destructive shadow is `Md` (cn::button parity);
+            // explicit demo of the shadow surface so the user sees
+            // a clearly elevated button.
+            if ui.button("Clear").destructive().shadow_md().clicked() {
+                sigs.sink_clears.set(count + 1);
+            }
+
+            const FORMAT_OPTIONS: &[(&str, &str)] = &[
+                ("text", "Plain text"),
+                ("json", "JSON"),
+                ("yaml", "YAML"),
+            ];
+            let resp = ui.select_signal(&sigs.sink_format, FORMAT_OPTIONS).show();
+            if resp.clicked {
+                let anchor = ui.host().rect_to_screen(resp.rect);
+                let fmt = sigs.sink_format.clone();
+                let mut menu = blinc_cn::context_menu().at(
+                    anchor.x(),
+                    anchor.y() + anchor.height() + 4.0,
+                );
+                for (value, label) in FORMAT_OPTIONS {
+                    let s = fmt.clone();
+                    let v = value.to_string();
+                    menu = menu.item(*label, move || s.set(v.clone()));
+                }
+                let _ = menu.show();
+            }
+        });
 
     // Minimal template for subgraph-reference nodes. Zero ports —
     // matches Zeal's `SubgraphNode` (the diamond is purely a
@@ -3877,6 +3950,16 @@ pub fn theme_bundle() -> blinc_theme::ThemeBundle {
     HybridTheme::bundle().with_css(blinc_cn::cn_styles::CN_STYLES)
 }
 
+/// Color scheme the demo wants — same call shape as
+/// `theme_bundle()` so the wasm wrapper picks it up automatically.
+/// Hardcoded `Dark` here so the editor demo always renders in dark
+/// mode; switch to `detect_system_color_scheme()` if the demo
+/// should follow the OS preference instead.
+pub fn theme_color_scheme() -> blinc_theme::ColorScheme {
+    let _ = detect_system_color_scheme; // silences unused-import on desktop
+    ColorScheme::Dark
+}
+
 // `main` is desktop-only. The wasm wrapper includes this file
 // verbatim (via build-web-examples codegen) and provides its own
 // `#[wasm_bindgen(start)]` entry that hands `build_ui` to
@@ -3912,7 +3995,7 @@ fn main() -> blinc_app::Result<()> {
     blinc_app::windowed::WindowedApp::run_with_theme(
         config,
         theme_bundle(),
-        detect_system_color_scheme(),
+        theme_color_scheme(),
         build_ui,
     )
 }
