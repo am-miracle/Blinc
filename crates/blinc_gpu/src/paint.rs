@@ -3466,6 +3466,44 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let uniform_scale = self.current_uniform_scale();
         let scaled_size = style.size * uniform_scale;
 
+        // Glyph rasterisation FLOOR + CEILING. Without these the
+        // raster size tracks the post-transform display size 1:1,
+        // and the atlas size-quantiser (`(font_size*2.0).round()`)
+        // creates a fresh bucket per ~0.5px display-size band.
+        // Zoom-out below ~4px hits empty hinted bitmaps and the
+        // text disappears; zoom-in pumps a new atlas entry for
+        // every zoom step, releasing + re-rasterising every glyph
+        // on the screen each frame the zoom moves — that's the
+        // "lag worsens as I zoom in deeper, persists when I zoom
+        // back out" symptom.
+        //
+        // Cap raster at [FLOOR..CEILING], scale the quad to make
+        // up the remainder. At display sizes between FLOOR and
+        // CEILING the raster matches the display exactly
+        // (`quad_scale == 1.0`, original pixel-perfect path).
+        // Beyond CEILING the same atlas glyph is reused regardless
+        // of zoom; the magnified quad samples it with Linear
+        // mag_filter for smoothness.
+        const TEXT_RASTER_FLOOR: f32 = 6.0;
+        // Ceiling lowered from 48 → 32. The atlas allocates one
+        // shelf per (font_id, glyph_id, size) tuple; each shelf
+        // takes raster_size² pixels (+padding). A canvas zooming
+        // 1x → max accumulates buckets at raster=12, 24, 36
+        // (display scaled_size before clamp). Higher ceiling
+        // means each bucket is bigger AND more sizes used. At 32
+        // the shelf is 56% smaller than at 48 and only sizes
+        // 6, 12, 18, 24, 32 land before the clamp engages —
+        // enough resolution for legible text up to ~150% the
+        // ceiling display size without the atlas filling on
+        // intermediate zoom levels and starving HUD text inserts.
+        const TEXT_RASTER_CEILING: f32 = 32.0;
+        let raster_size = scaled_size.clamp(TEXT_RASTER_FLOOR, TEXT_RASTER_CEILING);
+        let quad_scale = if raster_size > 0.0 {
+            scaled_size / raster_size
+        } else {
+            1.0
+        };
+
         // Get current opacity
         let opacity = self.combined_opacity();
 
@@ -3530,7 +3568,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             text,
             transformed_origin.x,
             transformed_origin.y,
-            scaled_size,
+            raster_size,
             color,
             anchor,
             alignment,
@@ -3543,6 +3581,26 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             None,
             style.letter_spacing,
         ) {
+            // When raster size was clamped (floor for zoom-out OR
+            // ceiling for zoom-in), the layout above ran at
+            // `raster_size`. Scale each glyph quad's offset from
+            // the text origin AND its w/h by `quad_scale` so the
+            // prim covers the intended display footprint while
+            // sampling the clamped atlas region. UV bounds stay
+            // unchanged. `quad_scale != 1.0` covers BOTH the
+            // minify direction (deep zoom-out → Linear min_filter
+            // smooth fade) and the magnify direction (deep zoom-in
+            // → Linear mag_filter smooth upscale).
+            if (quad_scale - 1.0).abs() > 1e-4 {
+                for glyph in &mut glyphs {
+                    let dx = glyph.bounds[0] - transformed_origin.x;
+                    let dy = glyph.bounds[1] - transformed_origin.y;
+                    glyph.bounds[0] = transformed_origin.x + dx * quad_scale;
+                    glyph.bounds[1] = transformed_origin.y + dy * quad_scale;
+                    glyph.bounds[2] *= quad_scale;
+                    glyph.bounds[3] *= quad_scale;
+                }
+            }
             // Apply current clip bounds and fade to all glyphs
             let glyph_clip_fade = self.get_clip_fade();
             for glyph in &mut glyphs {

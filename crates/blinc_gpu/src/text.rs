@@ -63,15 +63,25 @@ pub struct TextRenderingContext {
 impl TextRenderingContext {
     /// Create a new text rendering context
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
-        // Use Nearest filtering for sharp, pixel-perfect text at 1:1 scale
-        // Linear filtering causes blur when glyphs are rendered at exact pixel positions
+        // Linear min + mag filters. The raster-size clamp in
+        // `paint::draw_text` keeps the atlas glyph at
+        // `clamp(scaled_size, FLOOR=6, CEILING=48)` and scales the
+        // display quad to match the requested size. Below 1:1
+        // (zoom-out) Linear min_filter gives smooth fade; above
+        // 1:1 (zoom-in past the ceiling) Linear mag_filter gives a
+        // smooth upscale without the atlas growing a new bucket
+        // per zoom step — which is what caused "lag worsens as I
+        // zoom in deeper" before the ceiling landed. The cost vs
+        // Nearest at exact 1:1 is imperceptible because the raster
+        // size matches the display size (UV centres line up with
+        // atlas texel centres).
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Glyph Atlas Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
