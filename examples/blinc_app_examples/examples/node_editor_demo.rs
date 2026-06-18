@@ -220,6 +220,39 @@ fn open_color_picker_popover(
     let popover_id_for_content = popover_id.clone();
     let key_for_on_close = click_outside_key.clone();
 
+    // Viewport-aware position resolution. The overlay system places
+    // `AtPoint { x, y }` verbatim and does NOT auto-flip/shift when
+    // the popover would overflow the window — clipping a Done button
+    // off the bottom edge is exactly the "useless dialog" failure
+    // the user flagged. Estimate the popover bounding box from its
+    // chrome (padding + wheel + gaps + input + button), then flip
+    // vertically if anchoring below would overflow and clamp the
+    // horizontal placement so the right edge stays inside the
+    // window. Estimates intentionally err on the high side so the
+    // flip kicks in early rather than after the user sees a clipped
+    // frame.
+    // 4 px grid: pad 8 px on each side, gap 8 px between rows
+    // (`.gap(2.0)` = 2 units = 8 px). Wheel 224 + input ~32 + button
+    // ~32 + 2 gaps (16) + 2 pad (16) = 320; round up for slack.
+    const EST_POPOVER_W: f32 = 240.0; // wheel 224 + 2*pad(8) + slack
+    const EST_POPOVER_H: f32 = 320.0;
+    let (vp_w, vp_h) = blinc_core::context_state::BlincContextState::get().viewport_size();
+    let mut place_x = anchor.x();
+    let mut place_y = anchor.y() + anchor.height() + 4.0;
+    if vp_w > 0.0 && place_x + EST_POPOVER_W > vp_w {
+        place_x = (vp_w - EST_POPOVER_W).max(8.0);
+    }
+    if place_x < 8.0 {
+        place_x = 8.0;
+    }
+    let anchor_dir = if vp_h > 0.0 && place_y + EST_POPOVER_H > vp_h {
+        // Flip above the trigger.
+        place_y = (anchor.y() - EST_POPOVER_H - 4.0).max(8.0);
+        AnchorDirection::Top
+    } else {
+        AnchorDirection::Bottom
+    };
+
     // Hex input — seeded with the current hex once; on_change parses
     // and writes back to the bound signal. Bidirectional sync with
     // wheel drags isn't wired (would require re-pushing the value
@@ -236,8 +269,8 @@ fn open_color_picker_popover(
     let hex_data_on_change = hex_data.clone();
 
     let handle = OverlayBuilder::popover()
-        .at(anchor.x(), anchor.y() + anchor.height() + 4.0)
-        .anchor_direction(AnchorDirection::Bottom)
+        .at(place_x, place_y)
+        .anchor_direction(anchor_dir)
         .on_close(move |_reason| {
             click_outside::unregister_click_outside(&key_for_on_close);
         })
@@ -249,12 +282,14 @@ fn open_color_picker_popover(
             div()
                 .id(&popover_id_for_content)
                 .flex_col()
-                .gap(10.0)
+                // `gap(N)` is N * 4 px — `.gap(2)` → 8 px between
+                // wheel, hex input, and Done button.
+                .gap(2.0)
                 .bg(bg)
                 .border(1.0, border)
                 .rounded(8.0)
                 .lock_corner_shape()
-                .p_px(12.0)
+                .p_px(8.0)
                 .shadow_lg()
                 .child(blinc_portal_ui::color_wheel_panel(hex_signal.clone()))
                 .child(
