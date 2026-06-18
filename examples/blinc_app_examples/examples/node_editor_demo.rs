@@ -155,6 +155,7 @@ fn signals() -> &'static PortalSignals {
         sink_format: blinc_core::reactive::signal::<String>("text".to_string()),
         sink_clears: blinc_core::reactive::signal::<u32>(0),
         sink_label: blinc_core::reactive::signal::<String>("Output".to_string()),
+        formatter_decimals: blinc_core::reactive::signal::<f32>(2.0),
     })
 }
 
@@ -175,6 +176,12 @@ struct PortalSignals {
     /// path end-to-end (canvas-kit on_key_down + on_text_input →
     /// install_kbd_hook → text_input edit handler → signal write).
     sink_label: blinc_core::reactive::Signal<String>,
+    /// Formatter node's `decimals` config — drives the inline
+    /// `numeric_input` in the formatter's content slot. Integer
+    /// 0..8; mirrors the existing `NumberProperty::decimals` schema
+    /// on the template so the inline editor and the inspector
+    /// stay in sync.
+    formatter_decimals: blinc_core::reactive::Signal<f32>,
 }
 
 fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
@@ -301,12 +308,20 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         // lives in a different portal. Same signal, two readers.
         // The switch toggles a separate `running` signal; the
         // label below tracks the toggle.
-        .with_content(110.0, |_node_id, ui| {
+        .with_content(140.0, |_node_id, ui| {
             let sigs = signals();
             ui.label(&format!("Mirrors threshold: {:.2}", sigs.threshold.get()));
             ui.horizontal(|ui| {
                 ui.label("running");
                 ui.switch(&sigs.running).show();
+            });
+            ui.horizontal(|ui| {
+                ui.label("decimals");
+                ui.numeric_input(&sigs.formatter_decimals)
+                    .integer()
+                    .range(0.0..8.0)
+                    .width(64.0)
+                    .show();
             });
             ui.label(if sigs.running.get() {
                 "● live"
