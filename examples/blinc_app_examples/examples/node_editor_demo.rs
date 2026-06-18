@@ -320,7 +320,6 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 ui.numeric_input(&sigs.formatter_decimals)
                     .integer()
                     .range(0.0..8.0)
-                    .width(64.0)
                     .show();
             });
             ui.label(if sigs.running.get() {
