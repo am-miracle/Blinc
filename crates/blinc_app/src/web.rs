@@ -451,6 +451,17 @@ pub struct WebApp {
     /// `Scrolling` state forever and the user can never see the
     /// edge bounce back.
     last_wheel_time_ms: Option<u64>,
+    /// Timestamp (`now_ms()` epoch) of the most recent wheel-burst
+    /// cache invalidate + texture drain. Used to gate the
+    /// invalidate_render_cache_tagged + drain_all_layer_textures
+    /// pair in Phase 0b to ONLY fire at burst edges (first wheel
+    /// after a gap > `WHEEL_BURST_GAP_MS`) rather than every
+    /// wheel-bearing rAF. Running them every frame during a
+    /// sustained zoom gesture released composited / motion-subtree
+    /// textures faster than they could be re-baked, producing
+    /// visible jank that scaled with overlay count — the symptom
+    /// the user reports when nodes approach the HUD during zoom.
+    last_scroll_invalidate_ms: Option<u64>,
     /// Accumulated wheel delta (x, y) since the last `run_one_frame`
     /// drain. The wheel handler adds into this instead of
     /// dispatching directly so the runner can apply a true
@@ -797,6 +808,7 @@ impl WebApp {
             last_touch_pos: None,
             last_cursor: "default",
             last_wheel_time_ms: None,
+            last_scroll_invalidate_ms: None,
             pending_wheel_delta: (0.0, 0.0),
             cached_modifiers: blinc_platform::Modifiers::default(),
             render_state,
@@ -2486,18 +2498,36 @@ impl WebApp {
             // composite scratch staying at their old content-space
             // positions when the user zoomed the canvas after closing
             // the overlay.
-            self.blinc_app.invalidate_render_cache_tagged("had_scroll");
-            // The batch-cache wipe above doesn't drain the
-            // composite / motion-subtree layer textures (per the
-            // doc comment at invalidate_render_cache_tagged). On a
-            // canvas-bearing page a viewport pan/zoom invalidates
-            // EVERY texture's content-space layout, and the per-key
-            // hash heuristic can't detect that (the bake's input
-            // primitives may still be byte-identical when the
-            // canvas closure re-emits at new positions). Drop them
-            // all so the next paint re-bakes against the new
-            // viewport.
-            self.blinc_app.drain_all_layer_textures("had_scroll");
+            //
+            // BURST-EDGE GATING. Running invalidate_render_cache_tagged
+            // + drain_all_layer_textures every wheel-bearing rAF
+            // released composite / motion-subtree textures faster
+            // than the next paint could re-bake them, producing
+            // visible jank that scaled with overlay count (HUD
+            // composited texture in node_editor_demo + any
+            // motion containers near the viewport). The work
+            // belongs at burst edges only:
+            //   * first wheel after a gap > WHEEL_BURST_GAP_MS:
+            //     wipe + drain so stale-baked-position textures
+            //     don't persist into the new gesture.
+            //   * mid-burst frames: skip — content baked from
+            //     this burst's first frame is already at correct
+            //     content-space coords; invalidating it every
+            //     frame just churns.
+            //   * burst end (wheel-end debounce in Phase 1a below):
+            //     not strictly necessary because the next gesture
+            //     will re-fire the burst-start path, but cheap.
+            const WHEEL_BURST_GAP_MS: u64 = 100;
+            let is_burst_start = match self.last_scroll_invalidate_ms {
+                None => true,
+                Some(t) => now.saturating_sub(t) > WHEEL_BURST_GAP_MS,
+            };
+            if is_burst_start {
+                self.blinc_app.invalidate_render_cache_tagged("wheel_burst_start");
+                self.blinc_app
+                    .drain_all_layer_textures("wheel_burst_start");
+                self.last_scroll_invalidate_ms = Some(now);
+            }
         }
 
         // ─── Phase 1a: scroll physics + pending refs ─────────────
