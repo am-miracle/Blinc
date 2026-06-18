@@ -155,6 +155,7 @@ fn signals() -> &'static PortalSignals {
         sink_format: blinc_core::reactive::signal::<String>("text".to_string()),
         sink_clears: blinc_core::reactive::signal::<u32>(0),
         sink_label: blinc_core::reactive::signal::<String>("Output".to_string()),
+        sink_fill: blinc_core::reactive::signal::<String>("#3b82f6".to_string()),
         formatter_decimals: blinc_core::reactive::signal::<f32>(2.0),
     })
 }
@@ -176,6 +177,11 @@ struct PortalSignals {
     /// path end-to-end (canvas-kit on_key_down + on_text_input →
     /// install_kbd_hook → text_input edit handler → signal write).
     sink_label: blinc_core::reactive::Signal<String>,
+    /// Sink node's user-pickable fill colour. Stored as a
+    /// `#rrggbb[aa]` hex string — drives the inline
+    /// `ui.color_picker(...)` trigger chip; the trigger opens a host
+    /// overlay built from `portal_ui::color_wheel_panel`.
+    sink_fill: blinc_core::reactive::Signal<String>,
     /// Formatter node's `decimals` config — drives the inline
     /// `numeric_input` in the formatter's content slot. Integer
     /// 0..8; mirrors the existing `NumberProperty::decimals` schema
@@ -412,6 +418,37 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                     menu = menu.item(*label, move || s.set(v.clone()));
                 }
                 let _ = menu.show();
+            }
+
+            // Colour-picker trigger — paints a swatch + hex chip
+            // bound to `sink_fill`. On click the host opens a free-
+            // form popover anchored to the trigger rect; the popover
+            // hosts `color_wheel_panel(sink_fill)`, the canvas-based
+            // hue ring + SV square. The wheel reads/writes the same
+            // signal so the chip swatch updates as the user drags.
+            let color_resp = ui.color_picker(&sigs.sink_fill).show();
+            if color_resp.clicked {
+                let anchor = ui.host().rect_to_screen(color_resp.rect);
+                let fill = sigs.sink_fill.clone();
+                let _ = blinc_layout::widgets::overlay_stack::OverlayBuilder::popover()
+                    .at(anchor.x(), anchor.y() + anchor.height() + 4.0)
+                    .anchor_direction(blinc_layout::widgets::overlay::AnchorDirection::Bottom)
+                    .content(move || {
+                        let f = fill.clone();
+                        blinc_layout::div()
+                            .bg(blinc_theme::ThemeState::get()
+                                .color(blinc_theme::ColorToken::SurfaceElevated))
+                            .border(
+                                1.0,
+                                blinc_theme::ThemeState::get()
+                                    .color(blinc_theme::ColorToken::Border),
+                            )
+                            .rounded(8.0)
+                            .p_px(12.0)
+                            .shadow_lg()
+                            .child(blinc_portal_ui::color_wheel_panel(f.clone()))
+                    })
+                    .show();
             }
         });
 
