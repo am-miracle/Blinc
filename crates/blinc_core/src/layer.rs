@@ -516,6 +516,117 @@ impl Color {
         Self::rgb(r, g, b)
     }
 
+    /// Tolerant hex-string parser. Accepts 3 / 4 / 6 / 8 hex digits
+    /// with or without a leading `#`, ASCII case-insensitive. The
+    /// 3 / 4 -digit short forms expand each digit by duplication
+    /// (`#FAB` → `#FFAABB`). Whitespace is trimmed. Returns `None`
+    /// for any other length or non-hex character.
+    ///
+    /// Pair with [`Self::to_hex_string`] for round-trip-stable hex
+    /// I/O. Designed for picker / property surfaces that store
+    /// colour as a string under the `#rrggbb[aa]` contract.
+    pub fn from_hex_str(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let s = s.strip_prefix('#').unwrap_or(s);
+        let bytes = s.as_bytes();
+        let parse = |hi: u8, lo: u8| -> Option<u8> {
+            let h = (hi as char).to_digit(16)?;
+            let l = (lo as char).to_digit(16)?;
+            Some(((h << 4) | l) as u8)
+        };
+        let dup = |c: u8| -> Option<u8> {
+            let d = (c as char).to_digit(16)? as u8;
+            Some((d << 4) | d)
+        };
+        let (r, g, b, a) = match bytes.len() {
+            3 => (dup(bytes[0])?, dup(bytes[1])?, dup(bytes[2])?, 255u8),
+            4 => (
+                dup(bytes[0])?,
+                dup(bytes[1])?,
+                dup(bytes[2])?,
+                dup(bytes[3])?,
+            ),
+            6 => (
+                parse(bytes[0], bytes[1])?,
+                parse(bytes[2], bytes[3])?,
+                parse(bytes[4], bytes[5])?,
+                255u8,
+            ),
+            8 => (
+                parse(bytes[0], bytes[1])?,
+                parse(bytes[2], bytes[3])?,
+                parse(bytes[4], bytes[5])?,
+                parse(bytes[6], bytes[7])?,
+            ),
+            _ => return None,
+        };
+        Some(Self::rgba(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        ))
+    }
+
+    /// Canonical lowercase hex string. When `include_alpha` is
+    /// `true` OR the colour's alpha is not 1.0, emits the 8-digit
+    /// `#rrggbbaa` form; otherwise emits the 6-digit `#rrggbb`
+    /// form. Round-trip stable against [`Self::from_hex_str`]
+    /// modulo u8 quantisation.
+    pub fn to_hex_string(&self, include_alpha: bool) -> String {
+        let r = (self.r.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let g = (self.g.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let b = (self.b.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let a = (self.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if include_alpha || a != 255 {
+            format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+        } else {
+            format!("#{r:02x}{g:02x}{b:02x}")
+        }
+    }
+
+    /// Decompose into (hue 0–360, saturation 0–1, value 0–1, alpha
+    /// 0–1). For pure black (`max == 0.0`) the hue is conventionally
+    /// `0.0` so round-trips stay deterministic — the picker's hue
+    /// strip reads as "red" for `#000000`, which matches every
+    /// other colour-picker UX.
+    pub fn to_hsva(&self) -> (f32, f32, f32, f32) {
+        let max = self.r.max(self.g).max(self.b);
+        let min = self.r.min(self.g).min(self.b);
+        let d = max - min;
+        let h = if d == 0.0 {
+            0.0
+        } else if (max - self.r).abs() < f32::EPSILON {
+            60.0 * (((self.g - self.b) / d).rem_euclid(6.0))
+        } else if (max - self.g).abs() < f32::EPSILON {
+            60.0 * ((self.b - self.r) / d + 2.0)
+        } else {
+            60.0 * ((self.r - self.g) / d + 4.0)
+        };
+        let h = if h < 0.0 { h + 360.0 } else { h };
+        let s = if max == 0.0 { 0.0 } else { d / max };
+        (h, s, max, self.a)
+    }
+
+    /// Compose from HSVA. `h` is wrapped via `rem_euclid(360.0)`
+    /// so callers can pass un-normalised hue without panicking.
+    pub fn from_hsva(h: f32, s: f32, v: f32, a: f32) -> Self {
+        let h = h.rem_euclid(360.0);
+        let c = v * s;
+        let hp = h / 60.0;
+        let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
+        let (r1, g1, b1) = match hp as i32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        let m = v - c;
+        Self::rgba(r1 + m, g1 + m, b1 + m, a)
+    }
+
     pub fn with_alpha(mut self, alpha: f32) -> Self {
         self.a = alpha;
         self
