@@ -367,7 +367,7 @@ fn open_script_editor_popover(
 ) {
     use blinc_layout::overlay_state::overlay_stack;
     use blinc_layout::syntax::{
-        JsonHighlighter, PlainHighlighter, RustHighlighter, SyntaxConfig,
+        JsonHighlighter, LuaHighlighter, PlainHighlighter, RustHighlighter, SyntaxConfig,
     };
     use blinc_layout::widgets::code::{code_editor, code_editor_state};
     use blinc_layout::widgets::overlay::AnchorDirection;
@@ -458,6 +458,7 @@ fn open_script_editor_popover(
                             .syntax(match lang_for_closure {
                                 "rust" => SyntaxConfig::new(RustHighlighter::new()),
                                 "json" => SyntaxConfig::new(JsonHighlighter::new()),
+                                "lua" => SyntaxConfig::new(LuaHighlighter::new()),
                                 _ => SyntaxConfig::new(PlainHighlighter::new()),
                             })
                             .line_numbers(true)

@@ -300,32 +300,75 @@ fn highlight_line(line: &str, rules: &[TokenRule], default_color: Color) -> Styl
 // Built-in Highlighters
 // ============================================================================
 
-/// A simple highlighter with no rules (plain text)
+/// Generic-language highlighter. Covers the constructs that read
+/// the same way across most C-family / scripting languages —
+/// strings (double + single quoted), numeric literals, and
+/// line comments in the three common shells (`//`, `#`, `--`). No
+/// keyword set: anything not matched falls through to `text_color`.
+/// Designed for the "unknown language but I still want some
+/// visual structure" case used by the inline script editor's
+/// fallback path.
 pub struct PlainHighlighter {
+    rules: Arc<[TokenRule]>,
     text_color: Color,
     bg_color: Color,
 }
 
 impl PlainHighlighter {
-    /// Create a new plain highlighter with default colors
     pub fn new() -> Self {
         Self {
-            text_color: Color::rgba(0.9, 0.9, 0.9, 1.0),
+            rules: plain_rules(),
+            text_color: Color::rgba(0.86, 0.88, 0.90, 1.0),
             bg_color: Color::rgba(0.12, 0.12, 0.14, 1.0),
         }
     }
 
-    /// Set the text color
+    /// Override the default text colour — applied to spans that no
+    /// rule matched.
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = color;
         self
     }
 
-    /// Set the background color
+    /// Override the editor background colour.
     pub fn background(mut self, color: Color) -> Self {
         self.bg_color = color;
         self
     }
+}
+
+fn plain_rules() -> Arc<[TokenRule]> {
+    static CACHE: OnceLock<Arc<[TokenRule]>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            // Same palette as the language-specific highlighters so
+            // a fallback file doesn't visually clash with an opened
+            // `.rs` / `.lua` / `.json` next door.
+            let string_color = Color::rgba(0.81, 0.54, 0.44, 1.0); // Orange/brown
+            let comment_color = Color::rgba(0.42, 0.54, 0.35, 1.0); // Green
+            let number_color = Color::rgba(0.71, 0.82, 0.57, 1.0); // Light green
+
+            let rules: Vec<TokenRule> = vec![
+                // Line comments — order matters: catch before
+                // numbers / strings so a `// foo bar` segment
+                // doesn't get split by an inner match.
+                TokenRule::new(r"//.*$", comment_color).token_type(TokenType::Comment),
+                TokenRule::new(r"--.*$", comment_color).token_type(TokenType::Comment),
+                TokenRule::new(r"#.*$", comment_color).token_type(TokenType::Comment),
+                // Strings — double + single quoted with `\` escape.
+                TokenRule::new(r#""(?:[^"\\]|\\.)*""#, string_color)
+                    .token_type(TokenType::String),
+                TokenRule::new(r#"'(?:[^'\\]|\\.)*'"#, string_color)
+                    .token_type(TokenType::String),
+                // Numbers — integer / float / scientific / hex.
+                TokenRule::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?\b", number_color)
+                    .token_type(TokenType::Number),
+                TokenRule::new(r"\b0[xX][0-9a-fA-F]+\b", number_color)
+                    .token_type(TokenType::Number),
+            ];
+            Arc::from(rules)
+        })
+        .clone()
 }
 
 impl Default for PlainHighlighter {
@@ -336,7 +379,7 @@ impl Default for PlainHighlighter {
 
 impl SyntaxHighlighter for PlainHighlighter {
     fn token_rules(&self) -> &[TokenRule] {
-        &[]
+        &self.rules
     }
 
     fn default_color(&self) -> Color {
@@ -487,6 +530,91 @@ impl Default for JsonHighlighter {
 impl SyntaxHighlighter for JsonHighlighter {
     fn token_rules(&self) -> &[TokenRule] {
         &self.rules
+    }
+}
+
+/// A basic Lua syntax highlighter
+///
+/// Like [`RustHighlighter`] and [`JsonHighlighter`], the rule set
+/// is interned via `OnceLock` — every `LuaHighlighter::new()` shares
+/// the same compiled regex tables. Covers Lua 5.x keywords + the
+/// common stdlib functions (`tostring`, `tonumber`, `pairs`, etc.)
+/// as the `Function` token class, plus single + double-quoted
+/// strings, `--` line comments, and the literal keywords
+/// `nil` / `true` / `false`.
+pub struct LuaHighlighter {
+    rules: Arc<[TokenRule]>,
+    bg_color: Color,
+}
+
+impl LuaHighlighter {
+    pub fn new() -> Self {
+        Self {
+            rules: lua_rules(),
+            bg_color: Color::rgba(0.12, 0.12, 0.14, 1.0),
+        }
+    }
+}
+
+fn lua_rules() -> Arc<[TokenRule]> {
+    static CACHE: OnceLock<Arc<[TokenRule]>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let keyword_color = Color::rgba(0.77, 0.56, 0.82, 1.0); // Purple
+            let string_color = Color::rgba(0.81, 0.54, 0.44, 1.0); // Orange/brown
+            let comment_color = Color::rgba(0.42, 0.54, 0.35, 1.0); // Green
+            let number_color = Color::rgba(0.71, 0.82, 0.57, 1.0); // Light green
+            let function_color = Color::rgba(0.86, 0.82, 0.65, 1.0); // Yellow
+            let literal_color = Color::rgba(0.31, 0.76, 0.77, 1.0); // Cyan
+
+            let rules: Vec<TokenRule> = vec![
+                // Comments — `--` to end-of-line. Lua's block comment
+                // form `--[[ ... ]]` spans lines and isn't easily
+                // captured with a per-line regex pass; skipped here.
+                TokenRule::new(r"--.*$", comment_color).token_type(TokenType::Comment),
+                // Strings — single + double quoted with `\` escapes.
+                TokenRule::new(r#""(?:[^"\\]|\\.)*""#, string_color)
+                    .token_type(TokenType::String),
+                TokenRule::new(r#"'(?:[^'\\]|\\.)*'"#, string_color)
+                    .token_type(TokenType::String),
+                // Literals first so they don't get caught by the
+                // generic keyword regex below.
+                TokenRule::new(r"\b(nil|true|false)\b", literal_color)
+                    .token_type(TokenType::Keyword),
+                // Control + structure keywords.
+                TokenRule::new(
+                    r"\b(and|break|do|else|elseif|end|for|function|goto|if|in|local|not|or|repeat|return|then|until|while)\b",
+                    keyword_color,
+                )
+                .bold()
+                .token_type(TokenType::Keyword),
+                // Numbers — integer, float, scientific, hex.
+                TokenRule::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?\b", number_color)
+                    .token_type(TokenType::Number),
+                TokenRule::new(r"\b0[xX][0-9a-fA-F]+\b", number_color)
+                    .token_type(TokenType::Number),
+                // Function calls — identifier followed by `(`.
+                TokenRule::new(r"\b([a-zA-Z_][a-zA-Z_0-9]*)\s*\(", function_color)
+                    .token_type(TokenType::Function),
+            ];
+            Arc::from(rules)
+        })
+        .clone()
+}
+
+impl Default for LuaHighlighter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SyntaxHighlighter for LuaHighlighter {
+    fn token_rules(&self) -> &[TokenRule] {
+        &self.rules
+    }
+
+    fn background_color(&self) -> Color {
+        self.bg_color
     }
 }
 
