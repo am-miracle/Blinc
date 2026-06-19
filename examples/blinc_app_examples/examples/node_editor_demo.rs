@@ -1173,7 +1173,37 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 .show();
         });
 
-    vec![source, filter, formatter, sink, subgraph, noise, texture]
+    // SDF shape template — five 3D variants (box, sphere,
+    // cylinder, torus, capsule) plus two 2D variants. Node id
+    // picks the variant; instances paint different shapes from
+    // the same template.
+    let sdf = NodeTemplate::<DemoPort>::new("sdf", "SDF shape")
+        .with_category("display")
+        .with_subtitle("Raymarched primitive")
+        .with_icon(tabler_icon(outline::CUBE))
+        .with_output(
+            PortDesc::new("out_num", "depth", Direction::Output, DemoPort::Number)
+                .with_description("Shape's signed-distance sample at the centre"),
+        )
+        .with_content(112.0, |node_id, ui| {
+            let shape = match node_id.as_str() {
+                "sdf/sphere" => blinc_portal_ui::SdfShape::Sphere3D,
+                "sdf/torus" => blinc_portal_ui::SdfShape::Torus3D,
+                "sdf/cylinder" => blinc_portal_ui::SdfShape::Cylinder3D,
+                "sdf/capsule" => blinc_portal_ui::SdfShape::Capsule3D,
+                "sdf/rounded" => blinc_portal_ui::SdfShape::RoundedBox2D,
+                _ => blinc_portal_ui::SdfShape::Box3D,
+            };
+            ui.sdf_shape(shape)
+                .height(96.0)
+                .depth(0.4)
+                .rotate_x(0.35)
+                .rotate_y(0.7)
+                .pip(true)
+                .show();
+        });
+
+    vec![source, filter, formatter, sink, subgraph, noise, texture, sdf]
 }
 
 /// Host-side procedural test pattern — radial gradient × grid
@@ -1301,6 +1331,18 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
         // in the dataflow like every other node.
         NodeInstance::new("tex/preview", "texture", Point::new(980.0, 820.0))
             .with_subtitle("Test pattern"),
+        // SDF shapes — three 3D variants in a new row below the
+        // noise + texture band.
+        NodeInstance::new("sdf/box", "sdf", Point::new(80.0, 1060.0))
+            .with_subtitle("Box (3D)"),
+        NodeInstance::new("sdf/sphere", "sdf", Point::new(280.0, 1060.0))
+            .with_subtitle("Sphere (3D)"),
+        NodeInstance::new("sdf/torus", "sdf", Point::new(480.0, 1060.0))
+            .with_subtitle("Torus (3D)"),
+        NodeInstance::new("sdf/cylinder", "sdf", Point::new(680.0, 1060.0))
+            .with_subtitle("Cylinder (3D)"),
+        NodeInstance::new("sdf/rounded", "sdf", Point::new(880.0, 1060.0))
+            .with_subtitle("Rounded box (2D)"),
     ]
 }
 
