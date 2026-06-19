@@ -320,8 +320,13 @@ fn show_navigation_dropdown(
         .unwrap_or(0);
     let dropdown_handle = OverlayHandle::from_raw(next_handle_id);
 
+    // Mega-menu friendly cap — covers the documented
+    // `services_panel()` 3-4 column layout (~700 × 420). Tight
+    // nav-link lists stay smaller in practice; the size hint
+    // only feeds the viewport clamp, not the rendered size.
     let handle = OverlayBuilder::tooltip()
         .at(x, y)
+        .size(720.0, 480.0)
         .anchor_direction(AnchorDirection::Bottom)
         // Tooltip's default mouse_leave_delay_ms is 0 — too tight for a
         // hover-anchored dropdown. Give the user ~300ms to cross from the

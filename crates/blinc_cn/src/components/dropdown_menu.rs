@@ -520,8 +520,18 @@ fn spawn_dropdown_menu(
     let id_chain_for_content = id_chain.clone();
     let menu_id_for_content = menu_id.clone();
 
+    // Exact bounding box for the viewport-clamp in
+    // `position_wrapper`. Per-row height ≈ font_size + padding
+    // (matches the context_menu adoption); 20 px extra width
+    // covers the 1 px border each side + shortcut/chevron
+    // overflow margin. The clamp picks the right placement
+    // before the panel even mounts.
+    let est_w = min_width + 20.0;
+    let est_h = items.len() as f32 * (font_size + padding) + padding;
+
     let handle = OverlayBuilder::dropdown()
         .at(x, y)
+        .size(est_w, est_h)
         // Defaults: on_escape=true, on_click_outside=true (via registry).
         .on_close(move |_reason| {
             click_outside::unregister_click_outside(&click_outside_key_for_close);
@@ -612,8 +622,15 @@ fn spawn_dropdown_submenu(
     let root_click_outside_key_for_content = root_click_outside_key.clone();
     let submenu_id_for_content = submenu_id.clone();
 
+    // Same row-height formula as the root dropdown — submenus
+    // share `build_dropdown_menu_div` so the painted chrome is
+    // identical.
+    let est_w = min_width + 20.0;
+    let est_h = items.len() as f32 * (font_size + padding) + padding;
+
     let handle = OverlayBuilder::context_menu()
         .at(x, y)
+        .size(est_w, est_h)
         .on_close(move |_reason| {
             let mut chain = id_chain_for_close.get();
             chain.retain(|id| id != &submenu_id_for_close);

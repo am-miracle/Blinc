@@ -398,8 +398,12 @@ fn build_hover_card_overlay(
     let stored_close = overlay_handle_state.clone();
     let next_id_for_card = next_handle_id;
 
+    // max_w(320) + chrome (border, padding) and a generous-side
+    // height that covers the documented profile-card layout
+    // (avatar + multi-line bio + stats).
     let handle = OverlayBuilder::tooltip()
         .at(x, y)
+        .size(360.0, 400.0)
         .anchor_direction(anchor_dir)
         // Tooltip kind already has on_mouse_leave=true. Use the configured
         // close_delay so user can move mouse from trigger to card without

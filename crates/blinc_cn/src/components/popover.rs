@@ -391,8 +391,15 @@ fn build_popover_overlay(
     let popover_id_for_content = popover_id.clone();
     let click_outside_key_for_close = click_outside_key.clone();
 
+    // Generous-side estimate for the viewport-clamp in
+    // `position_wrapper`. Content is user-supplied (opaque
+    // `Arc<dyn Fn() -> Div>`) so we can't measure exactly; the
+    // 320 × 240 cap covers typical popovers (settings forms,
+    // button rows, multi-line text + action) plus the cn chrome
+    // (2 × 16 px Space4 padding + 1 px borders).
     let handle = OverlayBuilder::popover()
         .at(x, y)
+        .size(320.0, 240.0)
         .anchor_direction(anchor_dir)
         // Defaults from DismissRules::default_for(Dropdown): on_escape=true,
         // on_click_outside=true (handled here via click_outside registry),

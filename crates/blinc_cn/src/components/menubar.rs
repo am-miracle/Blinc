@@ -636,8 +636,15 @@ fn spawn_menubar_dropdown(
         OverlayBuilder::dropdown()
     };
 
+    // Exact row-height estimate for the viewport clamp — same
+    // shape as cn::context_menu / cn::dropdown_menu. font_size
+    // and padding are the local 14 / 12 from above.
+    let est_w = min_width + 20.0;
+    let est_h = items.len() as f32 * (font_size + padding) + padding;
+
     let handle = builder
         .at(x, y)
+        .size(est_w, est_h)
         .dismissable_by_escape(true)
         .on_close(move |_reason| {
             if active_menu_for_close.get() == Some(menu_idx) {
@@ -715,8 +722,14 @@ fn spawn_menubar_submenu(
 
     let parent_submenu_for_close = parent_submenu_state.clone();
 
+    // Submenus share `build_menubar_menu_div` so the row math
+    // matches the top-level dropdown.
+    let est_w = min_width + 20.0;
+    let est_h = items.len() as f32 * (font_size + padding) + padding;
+
     let handle = OverlayBuilder::tooltip()
         .at(x, y)
+        .size(est_w, est_h)
         .anchor_direction(AnchorDirection::Right)
         .dismissable_by_escape(true)
         // ~300ms grace so the cursor can cross from the parent row into the
