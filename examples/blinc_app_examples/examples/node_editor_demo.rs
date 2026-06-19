@@ -448,27 +448,39 @@ fn open_script_editor_popover(
                         .child(blinc_layout::text("{ }").color(text_muted))
                         .child(blinc_layout::text(lang_for_header).color(text_muted)),
                 )
-                // Editor body.
+                // Editor body — wrapped in a flex_row + overflow_clip
+                // + rounded container per `code_demo.rs`'s canonical
+                // pattern. The wrapper owns the chrome; the editor
+                // fills it via `.w_full()`.
                 .child(
-                    code_editor(&state_for_editor)
-                        .syntax(match lang_for_closure {
-                            "rust" => SyntaxConfig::new(RustHighlighter::new()),
-                            "json" => SyntaxConfig::new(JsonHighlighter::new()),
-                            _ => SyntaxConfig::new(PlainHighlighter::new()),
-                        })
-                        .line_numbers(true)
-                        .font_size(13.0)
-                        .padding(8.0)
-                        .w(544.0)
-                        .h(280.0)
-                        .on_change(move |new_src: &str| {
-                            // String equality guard — code_editor
-                            // fires on_change even for no-op events
-                            // (selection-only) on some platforms.
-                            if sig_on_change.get() != new_src {
-                                sig_on_change.set(new_src.to_string());
-                            }
-                        }),
+                    div().flex_row().w_full().h(280.0).overflow_clip().rounded(6.0).child(
+                        code_editor(&state_for_editor)
+                            .syntax(match lang_for_closure {
+                                "rust" => SyntaxConfig::new(RustHighlighter::new()),
+                                "json" => SyntaxConfig::new(JsonHighlighter::new()),
+                                _ => SyntaxConfig::new(PlainHighlighter::new()),
+                            })
+                            .line_numbers(true)
+                            // Default gutter (48 px) is sized for 3-4
+                            // digit line numbers; inline scripts rarely
+                            // pass 50 lines so 32 px gives clean room
+                            // for two digits without the dead-space
+                            // margin on a short script.
+                            .gutter_width(32.0)
+                            .font_size(13.0)
+                            .padding(8.0)
+                            .w_full()
+                            .h(280.0)
+                            .on_change(move |new_src: &str| {
+                                // String equality guard — code_editor
+                                // fires on_change even for no-op
+                                // events (selection-only) on some
+                                // platforms.
+                                if sig_on_change.get() != new_src {
+                                    sig_on_change.set(new_src.to_string());
+                                }
+                            }),
+                    ),
                 )
                 // Footer — Done button right-aligned.
                 .child(
@@ -687,7 +699,15 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         // trips). Clicking the format trigger opens a host overlay
         // (`blinc_cn::context_menu`) anchored against the trigger's
         // canvas-space rect via `ui.host().rect_to_screen`.
-        .with_content(160.0, |_node_id, ui| {
+        //
+        // `with_content_size(w, h, ...)` declares the content slot's
+        // natural width as a floor on the node's overall width —
+        // taffy widens the chrome to fit so callers don't hand-tune
+        // `NodeInstance::with_size`. Portal-UI is immediate-mode so
+        // taffy can't measure chip widths directly; declaring 320
+        // once on the template covers the longest chip (the
+        // inline-script preview's "+N more" form) plus padding.
+        .with_content_size(320.0, 160.0, |_node_id, ui| {
             let sigs = signals();
             // Inline editable label — clicks set focus, typing edits.
             ui.label("label:");
@@ -810,7 +830,11 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_badge(StatusBadge::running()),
         NodeInstance::new("fmt/1", "formatter", Point::new(360.0, 360.0)).with_size(200.0, 80.0),
         NodeInstance::new("sink/1", "sink", Point::new(660.0, 240.0))
-            .with_size(200.0, 100.0)
+            // No explicit `with_size` — the sink template uses
+            // `with_content_size` to declare a 320 × 160 content
+            // floor; the slot taffy pass widens the chrome so this
+            // instance ends up the right size without a manual
+            // override.
             .with_badge(StatusBadge::info(3).with_tooltip("3 pending writes")),
         // Subgraph-reference node. Renders as a diamond with the
         // accent fill/stroke regardless of the template's shape (the
