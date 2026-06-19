@@ -1200,15 +1200,19 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_size(200.0, 140.0)
             .with_subtitle("demo-workflow/sample-sub")
             .with_subgraph_ref(SubgraphId::from("sample-sub")),
-        // Noise generators — one instance per variant. Each
-        // template branch reads `node_id` to pick the kernel.
-        // Wired into the formatter so the noise output is part
-        // of the pipeline, not a disconnected showcase.
-        NodeInstance::new("noise/perlin", "noise", Point::new(360.0, 540.0))
+        // Noise generators — one instance per variant. Placed
+        // on a new row at y=820, well below the Transforms
+        // group + the src/radar row (~y=560→730) so they
+        // don't overlap any existing nodes. (Until the layout
+        // system grows collision response — see
+        // `feedback_collision_aware_node_layout` memory entry —
+        // positions are hand-spaced; a real host would auto-
+        // resolve overlaps.)
+        NodeInstance::new("noise/perlin", "noise", Point::new(80.0, 820.0))
             .with_subtitle("Perlin fbm"),
-        NodeInstance::new("noise/worley", "noise", Point::new(360.0, 700.0))
+        NodeInstance::new("noise/worley", "noise", Point::new(380.0, 820.0))
             .with_subtitle("Worley cells"),
-        NodeInstance::new("noise/voronoi", "noise", Point::new(660.0, 540.0))
+        NodeInstance::new("noise/voronoi", "noise", Point::new(680.0, 820.0))
             .with_subtitle("Voronoi cells"),
     ]
 }
