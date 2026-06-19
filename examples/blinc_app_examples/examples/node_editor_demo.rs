@@ -435,12 +435,17 @@ fn open_script_editor_popover(
                 .lock_corner_shape()
                 .p_px(8.0)
                 .shadow_lg()
-                // Header — quiet language label.
+                // Header — `{ }` script-icon glyph at the top-left
+                // (matches the trigger chip's leading icon so the
+                // affordance reads consistently), language label
+                // muted at the top-right.
                 .child(
                     div()
                         .w_full()
                         .flex_row()
-                        .justify_end()
+                        .items_center()
+                        .justify_between()
+                        .child(blinc_layout::text("{ }").color(text_muted))
                         .child(blinc_layout::text(lang_for_header).color(text_muted)),
                 )
                 // Editor body.
@@ -735,17 +740,32 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 open_color_picker_popover(anchor, sigs.sink_fill.clone());
             }
 
-            // Inline script editor — chip shows the first non-blank
-            // line plus a "+N more" suffix; clicking opens an
-            // overlay popover hosting blinc_layout::code_editor.
-            let script_resp = ui.script_editor(&sigs.sink_script).language("lua").show();
+            // Inline script editor — composed from the standard
+            // ButtonBuilder + `.icon("{ }")` rather than a bespoke
+            // widget. Preview is the first non-blank line plus a
+            // "+N more" suffix; the button label snapshot rebuilds
+            // every frame so the chip tracks the bound signal.
+            let src = sigs.sink_script.get();
+            let preview_first = src
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .or_else(|| src.lines().next())
+                .unwrap_or("")
+                .to_string();
+            let more = src.lines().count().saturating_sub(1);
+            let preview_label = if more > 0 {
+                format!("{} +{} more", preview_first, more)
+            } else {
+                preview_first
+            };
+            let script_resp = ui
+                .button(&preview_label)
+                .icon("{ }")
+                .outline()
+                .show();
             if script_resp.clicked {
                 let anchor = ui.host().rect_to_screen(script_resp.rect);
-                open_script_editor_popover(
-                    anchor,
-                    sigs.sink_script.clone(),
-                    script_resp.script_language,
-                );
+                open_script_editor_popover(anchor, sigs.sink_script.clone(), Some("lua"));
             }
         });
 
