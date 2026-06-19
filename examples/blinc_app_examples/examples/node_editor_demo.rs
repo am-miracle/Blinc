@@ -200,7 +200,6 @@ fn open_color_picker_popover(
     anchor: blinc_core::layer::Rect,
     hex_signal: blinc_core::reactive::Signal<String>,
 ) {
-    use blinc_core::layer::Color;
     use blinc_layout::overlay_state::overlay_stack;
     use blinc_layout::widgets::overlay::AnchorDirection;
     use blinc_layout::widgets::overlay_stack::OverlayBuilder;
@@ -220,45 +219,24 @@ fn open_color_picker_popover(
     let popover_id_for_content = popover_id.clone();
     let key_for_on_close = click_outside_key.clone();
 
-    // Viewport-aware position resolution. The overlay system places
-    // `AtPoint { x, y }` verbatim and does NOT auto-flip/shift when
-    // the popover would overflow the window — clipping a Done button
-    // off the bottom edge is exactly the "useless dialog" failure
-    // the user flagged. Estimate the popover bounding box from its
-    // chrome (padding + wheel + gaps + input + button), then flip
-    // vertically if anchoring below would overflow and clamp the
-    // horizontal placement so the right edge stays inside the
-    // window. Estimates intentionally err on the high side so the
-    // flip kicks in early rather than after the user sees a clipped
-    // frame.
-    // 4 px grid: pad 8 px on each side, gap 8 px between rows
-    // (`.gap(2.0)` = 2 units = 8 px). Wheel 224 + input ~32 + button
-    // ~32 + 2 gaps (16) + 2 pad (16) = 320; round up for slack.
-    const EST_POPOVER_W: f32 = 240.0; // wheel 224 + 2*pad(8) + slack
+    // Size hint feeds `position_wrapper`'s viewport clamp — when
+    // anchoring below would clip the Done button off the bottom
+    // edge, the overlay system flips above automatically. Padding
+    // 8 px on each side + wheel 224 + 2 * gap(8 px) + input ~32 +
+    // button ~32 ≈ 320 × 240 with a few px of slack.
+    const EST_POPOVER_W: f32 = 240.0;
     const EST_POPOVER_H: f32 = 320.0;
-    let (vp_w, vp_h) = blinc_core::context_state::BlincContextState::get().viewport_size();
-    let mut place_x = anchor.x();
-    let mut place_y = anchor.y() + anchor.height() + 4.0;
-    if vp_w > 0.0 && place_x + EST_POPOVER_W > vp_w {
-        place_x = (vp_w - EST_POPOVER_W).max(8.0);
-    }
-    if place_x < 8.0 {
-        place_x = 8.0;
-    }
-    let anchor_dir = if vp_h > 0.0 && place_y + EST_POPOVER_H > vp_h {
-        // Flip above the trigger.
-        place_y = (anchor.y() - EST_POPOVER_H - 4.0).max(8.0);
-        AnchorDirection::Top
-    } else {
-        AnchorDirection::Bottom
-    };
+    let place_x = anchor.x();
+    let place_y = anchor.y() + anchor.height() + 4.0;
+    let anchor_dir = AnchorDirection::Bottom;
 
-    // Hex input — seeded with the current hex once; on_change parses
-    // and writes back to the bound signal. Bidirectional sync with
-    // wheel drags isn't wired (would require re-pushing the value
-    // into the SharedTextInputData every frame, which fights focus /
-    // caret state); users typing here see immediate effect, wheel
-    // drags don't refresh the input until the popover re-opens.
+    // Hex input — seeded with the current hex once. on_change writes
+    // the user's typed string verbatim into `hex_signal`; canonical
+    // form happens implicitly when the wheel commits (drag → HSV →
+    // canonical hex string back into the signal). Keeping on_change
+    // pass-through avoids the mid-typing clobber where parsing
+    // "#3b8" would canonicalise to "#33bb88" and the bidirectional
+    // sync would overwrite the user's three-digit form.
     let hex_data = text_input_data_with_placeholder("#rrggbb");
     {
         let mut d = hex_data.lock().unwrap();
@@ -268,11 +246,39 @@ fn open_color_picker_popover(
     let hex_signal_on_change = hex_signal.clone();
     let hex_data_on_change = hex_data.clone();
 
+    // Wheel → input sync. A reactive `effect` listens on the hex
+    // signal and pushes the value into the SharedTextInputData
+    // whenever the wheel commits a drag. Guarded by string equality
+    // so the user's own typing (input → signal) doesn't loop back
+    // and clobber the cursor. `refresh_text_input` requests the
+    // input element re-render the new value. The effect handle is
+    // disposed in `on_close` so dropping the popover stops the
+    // subscription (otherwise hex updates after close would keep
+    // poking a SharedTextInputData no longer mounted in the tree).
+    let hex_for_effect = hex_signal.clone();
+    let data_for_effect = hex_data.clone();
+    let sync_effect = blinc_core::reactive::effect(move |_g| {
+        let new_hex = hex_for_effect.get();
+        let mut d = data_for_effect.lock().unwrap();
+        if d.value != new_hex {
+            d.value = new_hex;
+            d.cursor = d.value.len();
+            drop(d);
+            blinc_layout::widgets::text_input::refresh_text_input(&data_for_effect);
+        }
+    });
+
     let handle = OverlayBuilder::popover()
         .at(place_x, place_y)
+        .size(EST_POPOVER_W, EST_POPOVER_H)
         .anchor_direction(anchor_dir)
         .on_close(move |_reason| {
             click_outside::unregister_click_outside(&key_for_on_close);
+            // Tear down the wheel→input sync subscription so a
+            // post-close hex update doesn't poke a dead input.
+            if let Ok(mut g) = blinc_core::reactive::global_graph().lock() {
+                g.dispose_effect(sync_effect);
+            }
         })
         .content(move || {
             let bg = blinc_theme::ThemeState::get().color(ColorToken::SurfaceElevated);
@@ -296,9 +302,13 @@ fn open_color_picker_popover(
                     blinc_cn::input(&hex_for_input)
                         .placeholder("#rrggbb")
                         .on_change(move |new_val: &str| {
-                            if let Some(c) = Color::from_hex_str(new_val) {
-                                hex_signal_for_change.set(c.to_hex_string(c.a < 1.0));
-                            }
+                            // Write the user's typed string verbatim.
+                            // Canonicalisation lives in the wheel
+                            // commit path; canonicalising on every
+                            // keystroke would expand "#3b8" → "#33bb88"
+                            // mid-typing and bidirectional-sync would
+                            // overwrite the user's input.
+                            hex_signal_for_change.set(new_val.to_string());
                         }),
                 )
                 .child(
