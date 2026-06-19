@@ -160,6 +160,19 @@ fn signals() -> &'static PortalSignals {
             "-- Lua sink script\nfunction on_value(v)\n  return tostring(v)\nend".to_string(),
         ),
         formatter_decimals: blinc_core::reactive::signal::<f32>(2.0),
+        source_samples: blinc_core::reactive::signal::<Vec<f32>>({
+            // 32-sample sinusoid + a touch of noise — visually
+            // demonstrates the chart's area-fill + latest-dot
+            // affordances without needing per-frame mutation.
+            let mut v = Vec::with_capacity(32);
+            for i in 0..32 {
+                let t = i as f32 / 31.0;
+                let main = (t * std::f32::consts::TAU * 1.5).sin() * 0.6;
+                let bump = (t * std::f32::consts::TAU * 4.0).cos() * 0.15;
+                v.push(0.5 + main * 0.4 + bump);
+            }
+            v
+        }),
     })
 }
 
@@ -198,6 +211,11 @@ struct PortalSignals {
     /// on the template so the inline editor and the inspector
     /// stay in sync.
     formatter_decimals: blinc_core::reactive::Signal<f32>,
+    /// Static 32-sample series painted by the Source node's
+    /// inline `ui.chart(...)` sparkline. Demonstrates the line /
+    /// area / latest-dot chart affordances on a stable series; a
+    /// real host would mutate this from a streaming data source.
+    source_samples: blinc_core::reactive::Signal<Vec<f32>>,
 }
 
 /// Open the colour-wheel popover anchored under the trigger chip.
@@ -453,8 +471,8 @@ fn open_script_editor_popover(
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .child(blinc_layout::text("{ }").color(text_muted))
-                        .child(blinc_layout::text(lang_for_header).color(text_muted)),
+                        .child(blinc_layout::text("{ }").monospace().color(text_muted))
+                        .child(blinc_layout::text(lang_for_header).monospace().color(text_muted)),
                 )
                 // Editor body — wrapped in a flex_row + overflow_clip
                 // + rounded container per `code_demo.rs`'s canonical
@@ -527,7 +545,23 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         .with_output(
             PortDesc::new("out_num", "value", Direction::Output, DemoPort::Number)
                 .with_description("Stream of sampled numeric readings"),
-        );
+        )
+        // Inline sparkline showing the source's recent samples.
+        // Area variant with show_latest is the standard "live
+        // telemetry" look — the latest-dot marker doubles as a
+        // value indicator. Width / height left to the chart's
+        // defaults (clamped 120..240 × 80 px) so the slot widens
+        // to fit with fit-content; node chrome auto-resizes.
+        .with_content(96.0, |_node_id, ui| {
+            let sigs = signals();
+            ui.label("samples:");
+            ui.chart(&sigs.source_samples)
+                .area()
+                .show_latest(true)
+                .show_baseline(true)
+                .height(60.0)
+                .show();
+        });
 
     let filter = NodeTemplate::<DemoPort>::new("filter", "Filter")
         .with_category("transform")
