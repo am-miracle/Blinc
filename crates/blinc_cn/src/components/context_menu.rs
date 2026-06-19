@@ -371,8 +371,23 @@ impl ContextMenuBuilder {
         let menu_id_for_content = menu_id.clone();
         let click_outside_key_for_content = click_outside_key.clone();
 
+        // Estimate the menu bounding box so the overlay manager can
+        // keep the panel inside the viewport. Item height comes from
+        // `font_size + 2 * (padding / 2)` ≈ 14 + 12 = 26 px in the
+        // current builder. Separators sit at ~9 px (1 px line + 4 px
+        // pad each side). Round up + add chrome padding so the
+        // clamp has a small safety margin.
+        let est_item_h = font_size + padding;
+        let est_height = (items.len() as f32) * est_item_h + padding;
+
         let handle = OverlayBuilder::context_menu()
             .at(x, y)
+            // Hint the overlay manager so it can clamp / flip if the
+            // requested point would push items off the window edge.
+            // `position_wrapper`'s `AtPoint` clamp consults this when
+            // present; menus near a right/bottom edge now slide in
+            // instead of overflowing.
+            .size(width, est_height)
             // Defaults from DismissRules::default_for(ContextMenu):
             // on_escape=true, on_click_outside=true (handled via registry),
             // no backdrop.

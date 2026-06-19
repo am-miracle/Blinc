@@ -976,7 +976,58 @@ fn position_wrapper(
             .items_center()
             .justify_center()
             .child(child),
-        OverlayPosition::AtPoint { x, y } => outer.left(*x).top(*y).child(child),
+        OverlayPosition::AtPoint { x, y } => {
+            // Viewport-aware placement: when the caller supplied a
+            // `.size(w, h)` hint (or the OverlayKind has a sensible
+            // default — see `default_size_estimate_for`) we know the
+            // overlay's bounding box and can keep it inside the
+            // window. Flip vertically if anchoring at the desired y
+            // would overflow the bottom; shift left if it would
+            // overflow the right. Without a size hint we fall back
+            // to the raw `(x, y)` placement (legacy behaviour) — the
+            // caller has opted out of clamping by omitting the size.
+            //
+            // Symptom motivating this: context_menu / popover / any
+            // .at(x, y) overlay near the window edge would clip its
+            // Done / OK / menu items off-screen, making the action
+            // unreachable. The user-flagged "useless dialog" case.
+            let margin: f32 = 8.0;
+            let (clamped_x, clamped_y) = if let Some((w, h)) = size {
+                let mut cx = *x;
+                let mut cy = *y;
+                // Right edge — shift left so the panel right side
+                // sits at most `viewport.0 - margin`.
+                if cx + w + margin > viewport.0 {
+                    cx = (viewport.0 - w - margin).max(margin);
+                }
+                if cx < margin {
+                    cx = margin;
+                }
+                // Bottom edge — if the panel would clip off the
+                // bottom AND there's room above, flip above. Use
+                // *y as the trigger's natural anchor row; flipping
+                // mirrors the panel above by its own height with a
+                // small gap.
+                if cy + h + margin > viewport.1 {
+                    let flipped = cy - h - 8.0;
+                    if flipped >= margin {
+                        cy = flipped;
+                    } else {
+                        // No room above either — pin against the
+                        // bottom edge so the panel is at least
+                        // fully visible.
+                        cy = (viewport.1 - h - margin).max(margin);
+                    }
+                }
+                if cy < margin {
+                    cy = margin;
+                }
+                (cx, cy)
+            } else {
+                (*x, *y)
+            };
+            outer.left(clamped_x).top(clamped_y).child(child)
+        }
         OverlayPosition::Corner(c) => {
             // Anchor to a corner with a default 16px inset. Widgets can override.
             const INSET: f32 = 16.0;
