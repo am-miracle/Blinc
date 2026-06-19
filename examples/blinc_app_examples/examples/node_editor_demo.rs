@@ -951,8 +951,13 @@ type DemoHistory = Arc<Mutex<History<DemoPort, (), (), ()>>>;
 
 fn initial_nodes() -> Vec<NodeInstance<()>> {
     vec![
-        NodeInstance::new("src/1", "source", Point::new(80.0, 120.0))
-            .with_size(180.0, 80.0)
+        // Source nodes carry an inline sparkline now, so the
+        // content slot grows the node height past the legacy
+        // 80 px. Hand-spaced for the demo until the editor grows
+        // collision-aware layout response (queued); a real host
+        // would either bake the measured size into instance.size
+        // post-first-frame or auto-resolve overlaps each frame.
+        NodeInstance::new("src/1", "source", Point::new(80.0, 80.0))
             .with_badge(StatusBadge::success()),
         // `with_disabled(true)` demonstrates the soft-disable flag:
         // the renderer dims the body / icon / title via
@@ -960,9 +965,8 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
         // incident edge (only `src/threshold → filter/in_threshold`
         // here) to the faded `Pending` style. Press `D` while a
         // node is selected to toggle the flag at runtime.
-        NodeInstance::new("src/threshold", "source", Point::new(80.0, 280.0))
+        NodeInstance::new("src/threshold", "source", Point::new(80.0, 320.0))
             .with_subtitle("Threshold const")
-            .with_size(180.0, 80.0)
             .with_disabled(true),
         NodeInstance::new("filter/1", "filter", Point::new(360.0, 180.0))
             .with_size(200.0, 100.0)
@@ -989,10 +993,10 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_subtitle("demo-workflow/sample-sub")
             .with_subgraph_ref(SubgraphId::from("sample-sub")),
         // Histogram + distribution showcase the new bar and pie
-        // chart variants. Positioned below the main pipeline so
-        // they don't crowd existing connections.
-        NodeInstance::new("hist/1", "histogram", Point::new(360.0, 540.0)),
-        NodeInstance::new("dist/1", "distribution", Point::new(660.0, 540.0)),
+        // chart variants. Spread horizontally so the fit-content
+        // widening doesn't push them into each other.
+        NodeInstance::new("hist/1", "histogram", Point::new(80.0, 620.0)),
+        NodeInstance::new("dist/1", "distribution", Point::new(440.0, 620.0)),
     ]
 }
 
