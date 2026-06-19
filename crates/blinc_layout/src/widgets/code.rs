@@ -110,6 +110,16 @@ pub struct CodeConfig {
     pub indent_guide_color: Color,
     /// Enable code folding
     pub code_folding: bool,
+    /// Enable the find / replace search overlay (Cmd+F to open,
+    /// Cmd+G / Cmd+Shift+G next/prev, Cmd+H toggle replace,
+    /// Cmd+R toggle regex). Disabled by default — the search bar
+    /// is pushed via the legacy overlay manager (a sibling
+    /// top-level overlay, not nested under the host's content),
+    /// and clicks inside it dismiss the host popover via the
+    /// click_outside registry. Opt in for hosts that own the full
+    /// viewport; leave off when embedding inside a `cn::popover`
+    /// or any host overlay that uses click_outside dismissal.
+    pub search_enabled: bool,
 }
 
 impl Default for CodeConfig {
@@ -134,6 +144,7 @@ impl Default for CodeConfig {
             indent_guides: false,
             indent_guide_color: theme.color(ColorToken::Border).with_alpha(0.15),
             code_folding: false,
+            search_enabled: false,
         }
     }
 }
@@ -1923,7 +1934,7 @@ impl CodeEditor {
                                         }
                                     }
                                     // F = Find (toggle search bar overlay)
-                                    70 => {
+                                    70 if d.config.search_enabled => {
                                         if d.search_active {
                                             // Close search
                                             close_search_overlay(&mut d);
@@ -1934,7 +1945,7 @@ impl CodeEditor {
                                         cursor_changed = false;
                                     }
                                     // G = Next match / Shift+G = Previous match
-                                    71 => {
+                                    71 if d.config.search_enabled => {
                                         if d.search_active {
                                             if ctx.shift {
                                                 d.search_prev();
@@ -1944,7 +1955,7 @@ impl CodeEditor {
                                         }
                                     }
                                     // H = Toggle replace bar
-                                    72 => {
+                                    72 if d.config.search_enabled => {
                                         if !d.search_active {
                                             d.search_active = true;
                                         }
@@ -1953,7 +1964,7 @@ impl CodeEditor {
                                         cursor_changed = false;
                                     }
                                     // R = Toggle regex mode (when search active)
-                                    82 => {
+                                    82 if d.config.search_enabled => {
                                         if d.search_active {
                                             d.search_regex = !d.search_regex;
                                             d.execute_search();
@@ -2120,6 +2131,22 @@ impl CodeEditor {
     /// script. Has no effect when `line_numbers(false)`.
     pub fn gutter_width(self, px: f32) -> Self {
         self.state.lock().unwrap().config.gutter_width = px;
+        self
+    }
+
+    /// Enable the Cmd+F / Cmd+G / Cmd+H / Cmd+R find / replace
+    /// keybindings + search-bar overlay. Disabled by default
+    /// because the search bar is pushed via the legacy overlay
+    /// manager (a sibling top-level overlay, not nested under the
+    /// host's content), and clicks inside it dismiss the host
+    /// popover through the click_outside registry. Opt in for
+    /// hosts that own the full viewport; leave off when embedding
+    /// inside a `cn::popover` or any host overlay that uses
+    /// click_outside dismissal — the keybindings then no-op so
+    /// host shortcuts (Cmd+F = browser find on web, etc.) pass
+    /// through cleanly.
+    pub fn search_enabled(self, enabled: bool) -> Self {
+        self.state.lock().unwrap().config.search_enabled = enabled;
         self
     }
 

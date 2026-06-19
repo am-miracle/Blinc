@@ -125,6 +125,12 @@ fn editable_code_section(state: &SharedCodeEditorState) -> Div {
                         .line_numbers(true)
                         .indent_guides(true)
                         .code_folding(true)
+                        // Demo hosts the editor in the main viewport
+                        // so Cmd+F / Cmd+G / Cmd+H / Cmd+R are safe
+                        // to enable. Hosts embedding inside a
+                        // cn::popover / overlay should leave this
+                        // off (default) — see search_enabled doc.
+                        .search_enabled(true)
                         .font_size(13.0)
                         .w_full()
                         .h(300.0)
