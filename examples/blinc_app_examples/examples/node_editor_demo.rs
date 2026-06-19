@@ -709,14 +709,13 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         // (`blinc_cn::context_menu`) anchored against the trigger's
         // canvas-space rect via `ui.host().rect_to_screen`.
         //
-        // `with_content_size(w, h, ...)` declares the content slot's
-        // natural width as a floor on the node's overall width —
-        // taffy widens the chrome to fit so callers don't hand-tune
-        // `NodeInstance::with_size`. Portal-UI is immediate-mode so
-        // taffy can't measure chip widths directly; declaring 320
-        // once on the template covers the longest chip (the
-        // inline-script preview's "+N more" form) plus padding.
-        .with_content_size(320.0, 160.0, |_node_id, ui| {
+        // Real fit-content: `with_content(...)` declares only the
+        // body height. The width is measured each frame from the
+        // portal's `consumed_width()` (max of every widget's right
+        // edge) and fed back through `apply_portal_width_override`
+        // so the chrome grows to fit the actual chips. One-frame
+        // narrow flash on first paint; stable thereafter.
+        .with_content(160.0, |_node_id, ui| {
             let sigs = signals();
             // Inline editable label — clicks set focus, typing edits.
             ui.label("label:");
