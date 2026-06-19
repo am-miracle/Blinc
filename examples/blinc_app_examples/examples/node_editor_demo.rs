@@ -433,6 +433,14 @@ fn open_script_editor_popover(
                 .border(1.0, border)
                 .rounded(8.0)
                 .lock_corner_shape()
+                // Explicit width so `.w_full()` on the code-editor
+                // wrapper resolves against a real number. Without
+                // this the popover content sized to its natural
+                // children only and the editor collapsed to its
+                // intrinsic minimum (gutter + a few glyphs). `EST -
+                // 2 * p_px(8)` = 544 leaves the inner content area
+                // pinned at the size the viewport hint advertises.
+                .w(EST_POPOVER_W - 16.0)
                 .p_px(8.0)
                 .shadow_lg()
                 // Header — `{ }` script-icon glyph at the top-left
