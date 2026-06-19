@@ -1107,7 +1107,42 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         .with_icon(tabler_icon(outline::LINK))
         .with_shape(NodeShape::Diamond);
 
-    vec![source, filter, formatter, sink, subgraph]
+    // Noise generator template — three variants picked by node
+    // id so duplicate instances paint different patterns from
+    // the same template. Emits a Number port so the node can
+    // feed downstream as a noise source.
+    let noise = NodeTemplate::<DemoPort>::new("noise", "Noise")
+        .with_category("generate")
+        .with_subtitle("Procedural pattern")
+        .with_icon(tabler_icon(outline::WAVE_SINE))
+        .with_output(
+            PortDesc::new("out_num", "value", Direction::Output, DemoPort::Number)
+                .with_description("Sample of the procedural noise field"),
+        )
+        .with_content(96.0, |node_id, ui| {
+            let (variant, label) = match node_id.as_str() {
+                "noise/worley" => (blinc_portal_ui::NoiseVariant::Worley, "worley"),
+                "noise/voronoi" => (blinc_portal_ui::NoiseVariant::Voronoi, "voronoi"),
+                _ => (blinc_portal_ui::NoiseVariant::Perlin, "perlin"),
+            };
+            ui.label(label);
+            // Per-id seed so duplicate instances of the same
+            // variant paint different patterns.
+            let seed = node_id
+                .as_str()
+                .bytes()
+                .fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            ui.noise()
+                .variant(variant)
+                .seed(seed)
+                .scale(28.0)
+                .octaves(3)
+                .height(64.0)
+                .pip(true)
+                .show();
+        });
+
+    vec![source, filter, formatter, sink, subgraph, noise]
 }
 
 // ─── Initial graph ─────────────────────────────────────────────────
@@ -1165,6 +1200,16 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_size(200.0, 140.0)
             .with_subtitle("demo-workflow/sample-sub")
             .with_subgraph_ref(SubgraphId::from("sample-sub")),
+        // Noise generators — one instance per variant. Each
+        // template branch reads `node_id` to pick the kernel.
+        // Wired into the formatter so the noise output is part
+        // of the pipeline, not a disconnected showcase.
+        NodeInstance::new("noise/perlin", "noise", Point::new(360.0, 540.0))
+            .with_subtitle("Perlin fbm"),
+        NodeInstance::new("noise/worley", "noise", Point::new(360.0, 700.0))
+            .with_subtitle("Worley cells"),
+        NodeInstance::new("noise/voronoi", "noise", Point::new(660.0, 540.0))
+            .with_subtitle("Voronoi cells"),
     ]
 }
 
@@ -1187,6 +1232,20 @@ fn initial_connections() -> Vec<Connection<()>> {
             PortAddress::new("fmt/1".into(), "in_num"),
         )
         .with_state(ConnectionState::Running),
+        // Noise generators → formatter — three different
+        // procedural sources feeding into the same pipeline.
+        Connection::new(
+            PortAddress::new("noise/perlin".into(), "out_num"),
+            PortAddress::new("fmt/1".into(), "in_num"),
+        ),
+        Connection::new(
+            PortAddress::new("noise/worley".into(), "out_num"),
+            PortAddress::new("fmt/1".into(), "in_num"),
+        ),
+        Connection::new(
+            PortAddress::new("noise/voronoi".into(), "out_num"),
+            PortAddress::new("fmt/1".into(), "in_num"),
+        ),
         Connection::new(
             PortAddress::new("src/1".into(), "out_num"),
             PortAddress::new("fmt/1".into(), "in_num"),
