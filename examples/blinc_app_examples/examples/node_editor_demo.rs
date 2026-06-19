@@ -156,6 +156,9 @@ fn signals() -> &'static PortalSignals {
         sink_clears: blinc_core::reactive::signal::<u32>(0),
         sink_label: blinc_core::reactive::signal::<String>("Output".to_string()),
         sink_fill: blinc_core::reactive::signal::<String>("#3b82f6".to_string()),
+        sink_script: blinc_core::reactive::signal::<String>(
+            "-- Lua sink script\nfunction on_value(v)\n  return tostring(v)\nend".to_string(),
+        ),
         formatter_decimals: blinc_core::reactive::signal::<f32>(2.0),
     })
 }
@@ -182,6 +185,13 @@ struct PortalSignals {
     /// `ui.color_picker(...)` trigger chip; the trigger opens a host
     /// overlay built from `portal_ui::color_wheel_panel`.
     sink_fill: blinc_core::reactive::Signal<String>,
+    /// Sink node's Lua transform script. Drives the inline
+    /// `ui.script_editor(...)` trigger chip; clicking the chip opens
+    /// an overlay popover hosting a `blinc_layout::code_editor`
+    /// bound to this same signal. `on_change` from the editor
+    /// streams writes back to the signal so the chip's preview
+    /// updates as the user types.
+    sink_script: blinc_core::reactive::Signal<String>,
     /// Formatter node's `decimals` config — drives the inline
     /// `numeric_input` in the formatter's content slot. Integer
     /// 0..8; mirrors the existing `NumberProperty::decimals` schema
@@ -338,6 +348,146 @@ fn open_color_picker_popover(
     // its id mounted on the next frame's tree walk. Hit-tests against
     // ancestor element ids; any mouse-down whose ancestor chain
     // doesn't include `popover_id` triggers the dismiss.
+    click_outside::register_click_outside(&click_outside_key, &popover_id, move || {
+        handle.close();
+    });
+}
+
+/// Open the script-editor popover anchored under the trigger chip.
+/// Hosts a `blinc_layout::code_editor` bound one-way to `script_signal`
+/// via `on_change` — every keystroke writes the joined-lines `String`
+/// back to the signal so the chip's preview repaints live. The popover
+/// is the sole writer to `script_signal` while open, so no
+/// reverse-sync `effect` is needed (one-way binding sidesteps the
+/// missing public `set_value` on `CodeEditorData`).
+fn open_script_editor_popover(
+    anchor: blinc_core::layer::Rect,
+    script_signal: blinc_core::reactive::Signal<String>,
+    language: Option<&'static str>,
+) {
+    use blinc_layout::overlay_state::overlay_stack;
+    use blinc_layout::syntax::{
+        JsonHighlighter, PlainHighlighter, RustHighlighter, SyntaxConfig,
+    };
+    use blinc_layout::widgets::code::{code_editor, code_editor_state};
+    use blinc_layout::widgets::overlay::AnchorDirection;
+    use blinc_layout::widgets::overlay_stack::OverlayBuilder;
+    use blinc_layout::{click_outside, div};
+
+    let next_id = overlay_stack()
+        .lock()
+        .ok()
+        .map(|s| s.peek_next_handle_id())
+        .unwrap_or(0);
+    let popover_id = format!("portal-script-editor-{}", next_id);
+    let click_outside_key = format!("portal-script-editor:{}", next_id);
+    let popover_id_for_content = popover_id.clone();
+    let key_for_on_close = click_outside_key.clone();
+
+    // 4 px grid throughout: editor body 540 × 280 = 135 × 70 grid.
+    // Header label row + footer row each take one `ctrl_height`
+    // worth of space. Outer 8 px padding + two 8 px gaps + 32 px
+    // footer + 280 editor ≈ 360 — round to 368 so the viewport
+    // clamp's flip-above kicks in cleanly when the trigger sits
+    // low in the canvas.
+    const EST_POPOVER_W: f32 = 560.0;
+    const EST_POPOVER_H: f32 = 368.0;
+
+    // Seed the editor state from the current signal value. The
+    // `on_change` closure is the only write-back path; the chip's
+    // preview reads `script_signal.get()` each paint so it tracks
+    // typed edits without any extra wiring.
+    let state = code_editor_state(script_signal.get());
+
+    // Language is resolved to a fresh `SyntaxConfig` inside the
+    // content closure on every rebuild — `SyntaxConfig` is not
+    // `Clone`, and the highlighter rule sets are interned via
+    // `Arc` inside `RustHighlighter::new()` / `JsonHighlighter::new()`
+    // so constructing per-rebuild doesn't recompile regex tables.
+    // Lua isn't shipped so it falls through to plain (every
+    // keyboard affordance still works regardless).
+    let lang_label = language.unwrap_or("plain").to_string();
+    let lang_for_closure = language.unwrap_or("plain");
+
+    let script_signal_for_on_change = script_signal.clone();
+
+    let handle = OverlayBuilder::popover()
+        .at(anchor.x(), anchor.y() + anchor.height() + 4.0)
+        .size(EST_POPOVER_W, EST_POPOVER_H)
+        .anchor_direction(AnchorDirection::Bottom)
+        .on_close(move |_reason| {
+            click_outside::unregister_click_outside(&key_for_on_close);
+        })
+        .content(move || {
+            let bg = blinc_theme::ThemeState::get().color(ColorToken::SurfaceElevated);
+            let border = blinc_theme::ThemeState::get().color(ColorToken::Border);
+            let text_muted = blinc_theme::ThemeState::get().color(ColorToken::TextSecondary);
+            let state_for_editor = state.clone();
+            let sig_on_change = script_signal_for_on_change.clone();
+            let lang_for_header = lang_label.clone();
+            div()
+                .id(&popover_id_for_content)
+                .flex_col()
+                .gap(2.0)
+                .bg(bg)
+                .border(1.0, border)
+                .rounded(8.0)
+                .lock_corner_shape()
+                .p_px(8.0)
+                .shadow_lg()
+                // Header — quiet language label.
+                .child(
+                    div()
+                        .w_full()
+                        .flex_row()
+                        .justify_end()
+                        .child(blinc_layout::text(lang_for_header).color(text_muted)),
+                )
+                // Editor body.
+                .child(
+                    code_editor(&state_for_editor)
+                        .syntax(match lang_for_closure {
+                            "rust" => SyntaxConfig::new(RustHighlighter::new()),
+                            "json" => SyntaxConfig::new(JsonHighlighter::new()),
+                            _ => SyntaxConfig::new(PlainHighlighter::new()),
+                        })
+                        .line_numbers(true)
+                        .font_size(13.0)
+                        .padding(8.0)
+                        .w(544.0)
+                        .h(280.0)
+                        .on_change(move |new_src: &str| {
+                            // String equality guard — code_editor
+                            // fires on_change even for no-op events
+                            // (selection-only) on some platforms.
+                            if sig_on_change.get() != new_src {
+                                sig_on_change.set(new_src.to_string());
+                            }
+                        }),
+                )
+                // Footer — Done button right-aligned.
+                .child(
+                    div().w_full().flex_row().justify_end().child(
+                        blinc_cn::button("Done").on_click(move |_| {
+                            if let Ok(mut stack) = overlay_stack().lock() {
+                                stack.close(
+                                    blinc_layout::widgets::overlay_stack::OverlayHandle::from_raw(
+                                        next_id,
+                                    ),
+                                );
+                            }
+                        }),
+                    ),
+                )
+        })
+        .show();
+
+    debug_assert_eq!(
+        handle.raw(),
+        next_id,
+        "peek_next_handle_id was stale — concurrent push?"
+    );
+
     click_outside::register_click_outside(&click_outside_key, &popover_id, move || {
         handle.close();
     });
@@ -583,6 +733,19 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             if color_resp.clicked {
                 let anchor = ui.host().rect_to_screen(color_resp.rect);
                 open_color_picker_popover(anchor, sigs.sink_fill.clone());
+            }
+
+            // Inline script editor — chip shows the first non-blank
+            // line plus a "+N more" suffix; clicking opens an
+            // overlay popover hosting blinc_layout::code_editor.
+            let script_resp = ui.script_editor(&sigs.sink_script).language("lua").show();
+            if script_resp.clicked {
+                let anchor = ui.host().rect_to_screen(script_resp.rect);
+                open_script_editor_popover(
+                    anchor,
+                    sigs.sink_script.clone(),
+                    script_resp.script_language,
+                );
             }
         });
 
