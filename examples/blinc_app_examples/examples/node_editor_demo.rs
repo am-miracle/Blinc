@@ -40,6 +40,7 @@ use blinc_tabler_icons::outline;
 use blinc_theme::{
     ThemeState, detect_system_color_scheme, themes::universal::HybridTheme, tokens::ColorToken,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 // Resolve a theme colour at build time, falling back to a sane
@@ -152,70 +153,132 @@ fn signals() -> &'static PortalSignals {
     S.get_or_init(|| PortalSignals {
         threshold: blinc_core::reactive::signal::<f32>(0.5),
         running: blinc_core::reactive::signal::<bool>(false),
-        sink_format: blinc_core::reactive::signal::<String>("text".to_string()),
-        sink_clears: blinc_core::reactive::signal::<u32>(0),
-        sink_label: blinc_core::reactive::signal::<String>("Output".to_string()),
-        sink_fill: blinc_core::reactive::signal::<String>("#3b82f6".to_string()),
-        sink_script: blinc_core::reactive::signal::<String>(
-            "-- Lua sink script\nfunction on_value(v)\n  return tostring(v)\nend".to_string(),
-        ),
-        formatter_decimals: blinc_core::reactive::signal::<f32>(2.0),
-        source_samples: blinc_core::reactive::signal::<Vec<f32>>({
-            // 32-sample sinusoid + a touch of noise — visually
-            // demonstrates the chart's area-fill + latest-dot
-            // affordances without needing per-frame mutation.
-            let mut v = Vec::with_capacity(32);
-            for i in 0..32 {
-                let t = i as f32 / 31.0;
-                let main = (t * std::f32::consts::TAU * 1.5).sin() * 0.6;
-                let bump = (t * std::f32::consts::TAU * 4.0).cos() * 0.15;
-                v.push(0.5 + main * 0.4 + bump);
-            }
-            v
-        }),
+        sink_format: Default::default(),
+        sink_clears: Default::default(),
+        sink_label: Default::default(),
+        sink_fill: Default::default(),
+        sink_script: Default::default(),
+        formatter_decimals: Default::default(),
+        source_samples: Default::default(),
+        histogram_buckets: Default::default(),
+        pie_weights: Default::default(),
     })
+}
+
+/// Per-node-id signal lookup. `OnceLock`-based static map keyed by
+/// `NodeId` so each instance of a template gets its OWN signals
+/// instead of sharing one global value across every instance of the
+/// template. Each helper lazy-inits via the supplied default
+/// closure on first access.
+fn per_node<T: Send + 'static>(
+    map: &Mutex<HashMap<NodeId, blinc_core::reactive::Signal<T>>>,
+    node_id: &NodeId,
+    init: impl FnOnce() -> T,
+) -> blinc_core::reactive::Signal<T> {
+    let mut m = map.lock().unwrap();
+    if let Some(s) = m.get(node_id) {
+        return *s;
+    }
+    let s = blinc_core::reactive::signal(init());
+    m.insert(node_id.clone(), s);
+    s
 }
 
 struct PortalSignals {
     threshold: blinc_core::reactive::Signal<f32>,
     running: blinc_core::reactive::Signal<bool>,
     /// Display format for the Sink node — one of `text` / `json` /
-    /// `yaml`. The Sink node's portal content slot renders a
-    /// `select_trigger`; clicking opens a `cn::context_menu` and the
-    /// menu items write the chosen value back here.
-    sink_format: blinc_core::reactive::Signal<String>,
-    /// Click counter for the Sink node's "Clear" button. Bumps once
-    /// per click — exists purely to prove the button click round-trip
-    /// (paint → hit → consume-on-read → Response.clicked).
-    sink_clears: blinc_core::reactive::Signal<u32>,
-    /// User-editable label on the Sink node — drives the inline
-    /// `text_input` widget. Exercises portal_ui's typed-character
-    /// path end-to-end (canvas-kit on_key_down + on_text_input →
-    /// install_kbd_hook → text_input edit handler → signal write).
-    sink_label: blinc_core::reactive::Signal<String>,
-    /// Sink node's user-pickable fill colour. Stored as a
-    /// `#rrggbb[aa]` hex string — drives the inline
-    /// `ui.color_picker(...)` trigger chip; the trigger opens a host
-    /// overlay built from `portal_ui::color_wheel_panel`.
-    sink_fill: blinc_core::reactive::Signal<String>,
-    /// Sink node's Lua transform script. Drives the inline
-    /// `ui.script_editor(...)` trigger chip; clicking the chip opens
-    /// an overlay popover hosting a `blinc_layout::code_editor`
-    /// bound to this same signal. `on_change` from the editor
-    /// streams writes back to the signal so the chip's preview
-    /// updates as the user types.
-    sink_script: blinc_core::reactive::Signal<String>,
-    /// Formatter node's `decimals` config — drives the inline
-    /// `numeric_input` in the formatter's content slot. Integer
-    /// 0..8; mirrors the existing `NumberProperty::decimals` schema
-    /// on the template so the inline editor and the inspector
-    /// stay in sync.
-    formatter_decimals: blinc_core::reactive::Signal<f32>,
-    /// Static 32-sample series painted by the Source node's
-    /// inline `ui.chart(...)` sparkline. Demonstrates the line /
-    /// area / latest-dot chart affordances on a stable series; a
-    /// real host would mutate this from a streaming data source.
-    source_samples: blinc_core::reactive::Signal<Vec<f32>>,
+    /// `yaml`. Per-instance so two sink nodes don't clobber each
+    /// other's selection.
+    sink_format: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
+    /// Click counter for the Sink node's "Clear" button.
+    sink_clears: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<u32>>>,
+    /// User-editable label on the Sink node.
+    sink_label: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
+    /// Sink node's user-pickable fill colour (hex string).
+    sink_fill: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
+    /// Sink node's Lua transform script.
+    sink_script: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
+    /// Formatter node's `decimals` config (per instance so two
+    /// formatters can have different precisions).
+    formatter_decimals: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<f32>>>,
+    /// Per-instance 32-sample series painted by Source nodes via
+    /// `ui.chart(...)`. Seeded with a deterministic per-id phase
+    /// shift so duplicate sources render visually distinct
+    /// sparklines instead of sharing one global series.
+    source_samples: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
+    /// Histogram node's bucket weights — drives `ui.chart(...).bar()`.
+    histogram_buckets: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
+    /// Distribution node's slice weights — drives `ui.pie_chart(...)`.
+    pie_weights: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
+}
+
+impl PortalSignals {
+    fn sink_label_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
+        per_node(&self.sink_label, id, || "Output".to_string())
+    }
+    fn sink_format_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
+        per_node(&self.sink_format, id, || "text".to_string())
+    }
+    fn sink_clears_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<u32> {
+        per_node(&self.sink_clears, id, || 0)
+    }
+    fn sink_fill_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
+        per_node(&self.sink_fill, id, || "#3b82f6".to_string())
+    }
+    fn sink_script_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
+        per_node(&self.sink_script, id, || {
+            "-- Lua sink script\nfunction on_value(v)\n  return tostring(v)\nend".to_string()
+        })
+    }
+    fn formatter_decimals_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<f32> {
+        per_node(&self.formatter_decimals, id, || 2.0)
+    }
+    fn source_samples_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<Vec<f32>> {
+        per_node(&self.source_samples, id, || {
+            // Phase the sinusoid by a hash of the node id so
+            // duplicate sources don't share a series. Same shape,
+            // different start.
+            let phase = (id.as_str().bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))
+                % 360) as f32
+                * std::f32::consts::PI
+                / 180.0;
+            let mut v = Vec::with_capacity(32);
+            for i in 0..32 {
+                let t = i as f32 / 31.0;
+                let main = (t * std::f32::consts::TAU * 1.5 + phase).sin() * 0.6;
+                let bump = (t * std::f32::consts::TAU * 4.0 + phase).cos() * 0.15;
+                v.push(0.5 + main * 0.4 + bump);
+            }
+            v
+        })
+    }
+    fn histogram_buckets_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<Vec<f32>> {
+        per_node(&self.histogram_buckets, id, || {
+            let phase = (id.as_str().bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))
+                % 360) as f32
+                * std::f32::consts::PI
+                / 180.0;
+            (0..12)
+                .map(|i| {
+                    let t = i as f32 / 11.0;
+                    (0.2 + 0.7 * (t * std::f32::consts::TAU + phase).sin().abs()).clamp(0.05, 1.0)
+                })
+                .collect()
+        })
+    }
+    fn pie_weights_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<Vec<f32>> {
+        per_node(&self.pie_weights, id, || {
+            // Deterministic-but-varied slice mix per node id.
+            let mut seed = id.as_str().bytes().fold(1u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            (0..5)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                    0.1 + ((seed >> 16) as f32 / 65535.0) * 0.9
+                })
+                .collect()
+        })
+    }
 }
 
 /// Open the colour-wheel popover anchored under the trigger chip.
@@ -552,10 +615,11 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         // value indicator. Width / height left to the chart's
         // defaults (clamped 120..240 × 80 px) so the slot widens
         // to fit with fit-content; node chrome auto-resizes.
-        .with_content(96.0, |_node_id, ui| {
+        .with_content(96.0, |node_id, ui| {
             let sigs = signals();
             ui.label("samples:");
-            ui.chart(&sigs.source_samples)
+            let samples = sigs.source_samples_for(node_id);
+            ui.chart(&samples)
                 .area()
                 .show_latest(true)
                 .show_baseline(true)
@@ -677,7 +741,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         // lives in a different portal. Same signal, two readers.
         // The switch toggles a separate `running` signal; the
         // label below tracks the toggle.
-        .with_content(140.0, |_node_id, ui| {
+        .with_content(140.0, |node_id, ui| {
             let sigs = signals();
             ui.label(&format!("Mirrors threshold: {:.2}", sigs.threshold.get()));
             ui.horizontal(|ui| {
@@ -686,7 +750,8 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             });
             ui.horizontal(|ui| {
                 ui.label("decimals");
-                ui.numeric_input(&sigs.formatter_decimals)
+                let decimals = sigs.formatter_decimals_for(node_id);
+                ui.numeric_input(&decimals)
                     .integer()
                     .range(0.0..8.0)
                     .show();
@@ -749,24 +814,22 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         // edge) and fed back through `apply_portal_width_override`
         // so the chrome grows to fit the actual chips. One-frame
         // narrow flash on first paint; stable thereafter.
-        .with_content(160.0, |_node_id, ui| {
+        .with_content(160.0, |node_id, ui| {
             let sigs = signals();
+            let label_sig = sigs.sink_label_for(node_id);
+            let clears_sig = sigs.sink_clears_for(node_id);
+            let format_sig = sigs.sink_format_for(node_id);
+            let fill_sig = sigs.sink_fill_for(node_id);
+            let script_sig = sigs.sink_script_for(node_id);
+
             // Inline editable label — clicks set focus, typing edits.
             ui.label("label:");
-            ui.text_input(&sigs.sink_label)
-                .placeholder("Label…")
-                .show();
+            ui.text_input(&label_sig).placeholder("Label…").show();
 
-            let count = sigs.sink_clears.get();
+            let count = clears_sig.get();
             ui.label(&format!("cleared: {count}"));
-            // Destructive variant — Clear is an irreversible action
-            // (resets the accumulator). cn::button uses Destructive
-            // for the same intent class; portal_ui mirrors that.
-            // Default Destructive shadow is `Md` (cn::button parity);
-            // explicit demo of the shadow surface so the user sees
-            // a clearly elevated button.
             if ui.button("Clear").destructive().shadow_md().clicked() {
-                sigs.sink_clears.set(count + 1);
+                clears_sig.set(count + 1);
             }
 
             const FORMAT_OPTIONS: &[(&str, &str)] = &[
@@ -774,32 +837,24 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 ("json", "JSON"),
                 ("yaml", "YAML"),
             ];
-            let resp = ui.select_signal(&sigs.sink_format, FORMAT_OPTIONS).show();
+            let resp = ui.select_signal(&format_sig, FORMAT_OPTIONS).show();
             if resp.clicked {
                 let anchor = ui.host().rect_to_screen(resp.rect);
-                let fmt = sigs.sink_format.clone();
-                let mut menu = blinc_cn::context_menu().at(
-                    anchor.x(),
-                    anchor.y() + anchor.height() + 4.0,
-                );
+                let fmt = format_sig;
+                let mut menu = blinc_cn::context_menu()
+                    .at(anchor.x(), anchor.y() + anchor.height() + 4.0);
                 for (value, label) in FORMAT_OPTIONS {
-                    let s = fmt.clone();
+                    let s = fmt;
                     let v = value.to_string();
                     menu = menu.item(*label, move || s.set(v.clone()));
                 }
                 let _ = menu.show();
             }
 
-            // Colour-picker trigger — paints a swatch + hex chip
-            // bound to `sink_fill`. On click the host opens a free-
-            // form popover anchored to the trigger rect; the popover
-            // hosts `color_wheel_panel(sink_fill)`, the canvas-based
-            // hue ring + SV square. The wheel reads/writes the same
-            // signal so the chip swatch updates as the user drags.
-            let color_resp = ui.color_picker(&sigs.sink_fill).show();
+            let color_resp = ui.color_picker(&fill_sig).show();
             if color_resp.clicked {
                 let anchor = ui.host().rect_to_screen(color_resp.rect);
-                open_color_picker_popover(anchor, sigs.sink_fill.clone());
+                open_color_picker_popover(anchor, fill_sig);
             }
 
             // Inline script editor — composed from the standard
@@ -807,7 +862,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             // widget. Preview is the first non-blank line plus a
             // "+N more" suffix; the button label snapshot rebuilds
             // every frame so the chip tracks the bound signal.
-            let src = sigs.sink_script.get();
+            let src = script_sig.get();
             let preview_first = src
                 .lines()
                 .find(|l| !l.trim().is_empty())
@@ -820,14 +875,10 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             } else {
                 preview_first
             };
-            let script_resp = ui
-                .button(&preview_label)
-                .icon("{ }")
-                .outline()
-                .show();
+            let script_resp = ui.button(&preview_label).icon("{ }").outline().show();
             if script_resp.clicked {
                 let anchor = ui.host().rect_to_screen(script_resp.rect);
-                open_script_editor_popover(anchor, sigs.sink_script.clone(), Some("lua"));
+                open_script_editor_popover(anchor, script_sig, Some("lua"));
             }
         });
 
@@ -844,7 +895,53 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         .with_icon(tabler_icon(outline::LINK))
         .with_shape(NodeShape::Diamond);
 
-    vec![source, filter, formatter, sink, subgraph]
+    // Histogram — exercises ChartsBuilder.bar(). 12 buckets seeded
+    // with a per-id phase so duplicate histograms render distinct.
+    let histogram = NodeTemplate::<DemoPort>::new("histogram", "Histogram")
+        .with_category("visualise")
+        .with_subtitle("Bucket frequencies")
+        .with_icon(tabler_icon(outline::CHART_BAR))
+        .with_input(
+            PortDesc::new("in_num", "value", Direction::Input, DemoPort::Number)
+                .with_description("Numeric sample folded into a bucket"),
+        )
+        .with_content(96.0, |node_id, ui| {
+            let sigs = signals();
+            ui.label("buckets:");
+            let buckets = sigs.histogram_buckets_for(node_id);
+            ui.chart(&buckets)
+                .bar()
+                .y_range(0.0..1.0)
+                .bar_gap(2.0)
+                .height(60.0)
+                .show();
+        });
+
+    // Distribution — exercises PieChartBuilder. 5-slice mix seeded
+    // per-id; donut variant so the centre stays clear.
+    let distribution = NodeTemplate::<DemoPort>::new("distribution", "Distribution")
+        .with_category("visualise")
+        .with_subtitle("Mix breakdown")
+        .with_icon(tabler_icon(outline::CHART_PIE))
+        .with_input(
+            PortDesc::new("in_mix", "weights", Direction::Input, DemoPort::Number)
+                .with_description("Slice weight vector — auto-normalised"),
+        )
+        .with_content(112.0, |node_id, ui| {
+            let sigs = signals();
+            let weights = sigs.pie_weights_for(node_id);
+            ui.pie_chart(&weights).donut().diameter(96.0).show();
+        });
+
+    vec![
+        source,
+        filter,
+        formatter,
+        sink,
+        subgraph,
+        histogram,
+        distribution,
+    ]
 }
 
 // ─── Initial graph ─────────────────────────────────────────────────
@@ -891,6 +988,11 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_size(200.0, 140.0)
             .with_subtitle("demo-workflow/sample-sub")
             .with_subgraph_ref(SubgraphId::from("sample-sub")),
+        // Histogram + distribution showcase the new bar and pie
+        // chart variants. Positioned below the main pipeline so
+        // they don't crowd existing connections.
+        NodeInstance::new("hist/1", "histogram", Point::new(360.0, 540.0)),
+        NodeInstance::new("dist/1", "distribution", Point::new(660.0, 540.0)),
     ]
 }
 
