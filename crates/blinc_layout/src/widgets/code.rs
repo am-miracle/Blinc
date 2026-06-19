@@ -2112,6 +2112,17 @@ impl CodeEditor {
         self
     }
 
+    /// Width (px) of the gutter column that hosts line numbers and
+    /// fold icons. Defaults to 48 px — enough for 3-4 digit line
+    /// numbers. Editors hosting short snippets (popovers, inline
+    /// node-content) can drop this to 28-32 px so the line-number
+    /// column doesn't look like dead space next to a 4-line
+    /// script. Has no effect when `line_numbers(false)`.
+    pub fn gutter_width(self, px: f32) -> Self {
+        self.state.lock().unwrap().config.gutter_width = px;
+        self
+    }
+
     pub fn line_height(self, multiplier: f32) -> Self {
         self.state.lock().unwrap().config.line_height = multiplier;
         self
