@@ -1196,7 +1196,6 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             };
             ui.sdf_shape(shape)
                 .height(96.0)
-                .depth(0.4)
                 .rotate_x(0.35)
                 .rotate_y(0.7)
                 .pip(true)
