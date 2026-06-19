@@ -609,22 +609,45 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             PortDesc::new("out_num", "value", Direction::Output, DemoPort::Number)
                 .with_description("Stream of sampled numeric readings"),
         )
-        // Inline sparkline showing the source's recent samples.
-        // Area variant with show_latest is the standard "live
-        // telemetry" look — the latest-dot marker doubles as a
-        // value indicator. Width / height left to the chart's
-        // defaults (clamped 120..240 × 80 px) so the slot widens
-        // to fit with fit-content; node chrome auto-resizes.
-        .with_content(96.0, |node_id, ui| {
+        // Branch on `node_id` so multiple source instances render
+        // distinct visualisations off the SAME template. Each
+        // source carries its own `source_samples_for` /
+        // `histogram_buckets_for` / `pie_weights_for` signals
+        // (per-instance lookup), so the choice of widget here is
+        // purely cosmetic: the data shapes don't conflict and
+        // every source can pick whichever chart fits its role.
+        // - `src/1`        → area sparkline (live-telemetry look)
+        // - `src/threshold`→ bar histogram (bucket frequencies)
+        // - any other id   → donut pie (mix breakdown)
+        .with_content(112.0, |node_id, ui| {
             let sigs = signals();
-            ui.label("samples:");
-            let samples = sigs.source_samples_for(node_id);
-            ui.chart(&samples)
-                .area()
-                .show_latest(true)
-                .show_baseline(true)
-                .height(60.0)
-                .show();
+            match node_id.as_str() {
+                "src/1" => {
+                    ui.label("samples:");
+                    let samples = sigs.source_samples_for(node_id);
+                    ui.chart(&samples)
+                        .area()
+                        .show_latest(true)
+                        .show_baseline(true)
+                        .height(60.0)
+                        .show();
+                }
+                "src/threshold" => {
+                    ui.label("buckets:");
+                    let buckets = sigs.histogram_buckets_for(node_id);
+                    ui.chart(&buckets)
+                        .bar()
+                        .y_range(0.0..1.0)
+                        .bar_gap(2.0)
+                        .height(60.0)
+                        .show();
+                }
+                _ => {
+                    ui.label("mix:");
+                    let weights = sigs.pie_weights_for(node_id);
+                    ui.pie_chart(&weights).donut().diameter(72.0).show();
+                }
+            }
         });
 
     let filter = NodeTemplate::<DemoPort>::new("filter", "Filter")
@@ -895,53 +918,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         .with_icon(tabler_icon(outline::LINK))
         .with_shape(NodeShape::Diamond);
 
-    // Histogram — exercises ChartsBuilder.bar(). 12 buckets seeded
-    // with a per-id phase so duplicate histograms render distinct.
-    let histogram = NodeTemplate::<DemoPort>::new("histogram", "Histogram")
-        .with_category("visualise")
-        .with_subtitle("Bucket frequencies")
-        .with_icon(tabler_icon(outline::CHART_BAR))
-        .with_input(
-            PortDesc::new("in_num", "value", Direction::Input, DemoPort::Number)
-                .with_description("Numeric sample folded into a bucket"),
-        )
-        .with_content(96.0, |node_id, ui| {
-            let sigs = signals();
-            ui.label("buckets:");
-            let buckets = sigs.histogram_buckets_for(node_id);
-            ui.chart(&buckets)
-                .bar()
-                .y_range(0.0..1.0)
-                .bar_gap(2.0)
-                .height(60.0)
-                .show();
-        });
-
-    // Distribution — exercises PieChartBuilder. 5-slice mix seeded
-    // per-id; donut variant so the centre stays clear.
-    let distribution = NodeTemplate::<DemoPort>::new("distribution", "Distribution")
-        .with_category("visualise")
-        .with_subtitle("Mix breakdown")
-        .with_icon(tabler_icon(outline::CHART_PIE))
-        .with_input(
-            PortDesc::new("in_mix", "weights", Direction::Input, DemoPort::Number)
-                .with_description("Slice weight vector — auto-normalised"),
-        )
-        .with_content(112.0, |node_id, ui| {
-            let sigs = signals();
-            let weights = sigs.pie_weights_for(node_id);
-            ui.pie_chart(&weights).donut().diameter(96.0).show();
-        });
-
-    vec![
-        source,
-        filter,
-        formatter,
-        sink,
-        subgraph,
-        histogram,
-        distribution,
-    ]
+    vec![source, filter, formatter, sink, subgraph]
 }
 
 // ─── Initial graph ─────────────────────────────────────────────────
@@ -992,11 +969,6 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_size(200.0, 140.0)
             .with_subtitle("demo-workflow/sample-sub")
             .with_subgraph_ref(SubgraphId::from("sample-sub")),
-        // Histogram + distribution showcase the new bar and pie
-        // chart variants. Spread horizontally so the fit-content
-        // widening doesn't push them into each other.
-        NodeInstance::new("hist/1", "histogram", Point::new(80.0, 620.0)),
-        NodeInstance::new("dist/1", "distribution", Point::new(440.0, 620.0)),
     ]
 }
 
