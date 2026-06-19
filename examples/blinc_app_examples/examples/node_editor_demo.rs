@@ -1111,6 +1111,37 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
     // id so duplicate instances paint different patterns from
     // the same template. Emits a Number port so the node can
     // feed downstream as a noise source.
+    // Texture template — host-side procedural texture (gradient
+    // + grid) displayed via portal_ui's TextureBuilder. Static
+    // byte buffer so the demo doesn't need asset loading; a
+    // real host would pass `ImageId` for cached GPU textures.
+    let texture = NodeTemplate::<DemoPort>::new("texture", "Texture")
+        .with_category("display")
+        .with_subtitle("Image viewer")
+        .with_icon(tabler_icon(outline::PHOTO))
+        .with_input(
+            PortDesc::new("in_id", "image", Direction::Input, DemoPort::Number)
+                .with_description("ImageId — wired via host's asset loader"),
+        )
+        .with_content(96.0, |node_id, ui| {
+            // Bake a small RGBA test pattern keyed by node id so
+            // duplicate instances paint different palettes.
+            let seed = node_id
+                .as_str()
+                .bytes()
+                .fold(11u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            let buf = bake_test_pattern(seed, 128, 64);
+            ui.texture(blinc_portal_ui::TextureSource::Rgba {
+                data: &buf,
+                width: 128,
+                height: 64,
+            })
+            .cover()
+            .height(60.0)
+            .pip(true)
+            .show();
+        });
+
     let noise = NodeTemplate::<DemoPort>::new("noise", "Noise")
         .with_category("generate")
         .with_subtitle("Procedural pattern")
@@ -1142,7 +1173,56 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 .show();
         });
 
-    vec![source, filter, formatter, sink, subgraph, noise]
+    vec![source, filter, formatter, sink, subgraph, noise, texture]
+}
+
+/// Host-side procedural test pattern — radial gradient × grid
+/// modulated by a per-id seed so each demo texture instance
+/// reads as distinct. A real host would replace this with an
+/// `ImageId` from the asset loader; here it's a self-contained
+/// way to exercise `TextureSource::Rgba` without bundling
+/// image files.
+fn bake_test_pattern(seed: u32, w: u32, h: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+    let cx = w as f32 * 0.5;
+    let cy = h as f32 * 0.5;
+    let max_r = ((cx * cx + cy * cy).sqrt()).max(1.0);
+    // Phase the hue ramp by seed so duplicates aren't identical.
+    let hue_base = (seed % 360) as f32;
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let r = (dx * dx + dy * dy).sqrt() / max_r;
+            let grid = if (x % 16 == 0) || (y % 16 == 0) { 0.15 } else { 0.0 };
+            let v = (1.0 - r).clamp(0.0, 1.0) * 0.85 + grid;
+            // Hue rotation around the ring.
+            let hue = (hue_base + r * 240.0) % 360.0;
+            let (rc, gc, bc) = hsl_to_rgb(hue, 0.65, 0.5);
+            let i = ((y * w + x) * 4) as usize;
+            buf[i] = (rc * v * 255.0).clamp(0.0, 255.0) as u8;
+            buf[i + 1] = (gc * v * 255.0).clamp(0.0, 255.0) as u8;
+            buf[i + 2] = (bc * v * 255.0).clamp(0.0, 255.0) as u8;
+            buf[i + 3] = 255;
+        }
+    }
+    buf
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h6 = h / 60.0;
+    let x = c * (1.0 - (h6.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match h6 as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c * 0.5;
+    (r1 + m, g1 + m, b1 + m)
 }
 
 // ─── Initial graph ─────────────────────────────────────────────────
@@ -1214,6 +1294,13 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_subtitle("Worley cells"),
         NodeInstance::new("noise/voronoi", "noise", Point::new(680.0, 820.0))
             .with_subtitle("Voronoi cells"),
+        // Texture viewer — fed by the perlin noise generator's
+        // output as the "ImageId" input. The wiring is symbolic
+        // (the texture's body bakes its own pattern); the
+        // connection demonstrates that texture nodes participate
+        // in the dataflow like every other node.
+        NodeInstance::new("tex/preview", "texture", Point::new(980.0, 820.0))
+            .with_subtitle("Test pattern"),
     ]
 }
 
@@ -1249,6 +1336,14 @@ fn initial_connections() -> Vec<Connection<()>> {
         Connection::new(
             PortAddress::new("noise/voronoi".into(), "out_num"),
             PortAddress::new("fmt/1".into(), "in_num"),
+        ),
+        // Texture viewer takes the perlin noise generator's
+        // output as its "image source" signal. Symbolic wiring;
+        // the texture node bakes its own RGBA pattern in the
+        // body, but the connection puts it in the dataflow.
+        Connection::new(
+            PortAddress::new("noise/perlin".into(), "out_num"),
+            PortAddress::new("tex/preview".into(), "in_id"),
         ),
         Connection::new(
             PortAddress::new("src/1".into(), "out_num"),
