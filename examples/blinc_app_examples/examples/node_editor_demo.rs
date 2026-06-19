@@ -162,6 +162,7 @@ fn signals() -> &'static PortalSignals {
         source_samples: Default::default(),
         histogram_buckets: Default::default(),
         pie_weights: Default::default(),
+        radar_axes: Default::default(),
     })
 }
 
@@ -211,6 +212,8 @@ struct PortalSignals {
     histogram_buckets: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
     /// Distribution node's slice weights — drives `ui.pie_chart(...)`.
     pie_weights: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
+    /// Radar / spider chart axes — drives `ui.radar_chart(...)`.
+    radar_axes: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
 }
 
 impl PortalSignals {
@@ -275,6 +278,21 @@ impl PortalSignals {
                 .map(|_| {
                     seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
                     0.1 + ((seed >> 16) as f32 / 65535.0) * 0.9
+                })
+                .collect()
+        })
+    }
+    fn radar_axes_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<Vec<f32>> {
+        per_node(&self.radar_axes, id, || {
+            // 6-axis health vector — per-id deterministic seed.
+            let mut seed = id
+                .as_str()
+                .bytes()
+                .fold(7u32, |a, b| a.wrapping_mul(17).wrapping_add(b as u32));
+            (0..6)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    0.2 + ((seed >> 16) as f32 / 65535.0) * 0.8
                 })
                 .collect()
         })
@@ -767,7 +785,39 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         );
                     }
                 }
+                "src/radar" => {
+                    // Radar / spider chart of the node's 6-axis
+                    // "telemetry" vector. Wired into the filter
+                    // via the dataflow so it's an active member
+                    // of the pipeline, not a standalone.
+                    let axes = sigs.radar_axes_for(node_id);
+                    let resp = ui
+                        .radar_chart(&axes)
+                        .labels(vec![
+                            "cpu".to_string(),
+                            "mem".to_string(),
+                            "io".to_string(),
+                            "net".to_string(),
+                            "err".to_string(),
+                            "lat".to_string(),
+                        ])
+                        .y_range(0.0..1.0)
+                        .diameter(112.0)
+                        .pip(true)
+                        .show();
+                    if resp.pip_clicked {
+                        let anchor = ui.host().rect_to_screen(resp.rect);
+                        open_chart_pip_popover(
+                            anchor,
+                            ChartKind::Pie,
+                            axes,
+                            node_id.clone(),
+                        );
+                    }
+                }
                 _ => {
+                    // Default — pie / mix breakdown (subgraph
+                    // inner source, any future demo instances).
                     ui.label("mix:");
                     let weights = sigs.pie_weights_for(node_id);
                     let resp = ui
@@ -1084,6 +1134,13 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
         NodeInstance::new("src/threshold", "source", Point::new(80.0, 320.0))
             .with_subtitle("Threshold const")
             .with_disabled(true),
+        // Third source instance — renders the new radar chart
+        // variant via the source template's per-id branch. Wired
+        // into the filter via the dataflow so it's not floating
+        // disconnected from the pipeline.
+        NodeInstance::new("src/radar", "source", Point::new(80.0, 560.0))
+            .with_subtitle("Telemetry vector")
+            .with_badge(StatusBadge::info(6).with_tooltip("6-axis radar")),
         NodeInstance::new("filter/1", "filter", Point::new(360.0, 180.0))
             .with_size(200.0, 100.0)
             .with_badge(StatusBadge::running()),
@@ -1122,6 +1179,14 @@ fn initial_connections() -> Vec<Connection<()>> {
             PortAddress::new("src/threshold".into(), "out_num"),
             PortAddress::new("filter/1".into(), "in_threshold"),
         ),
+        // Radar source → formatter — wires the new radar-chart
+        // instance into the pipeline so it's an active member of
+        // the dataflow, not a floating standalone.
+        Connection::new(
+            PortAddress::new("src/radar".into(), "out_num"),
+            PortAddress::new("fmt/1".into(), "in_num"),
+        )
+        .with_state(ConnectionState::Running),
         Connection::new(
             PortAddress::new("src/1".into(), "out_num"),
             PortAddress::new("fmt/1".into(), "in_num"),
