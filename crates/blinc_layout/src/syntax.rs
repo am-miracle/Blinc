@@ -356,10 +356,8 @@ fn plain_rules() -> Arc<[TokenRule]> {
                 TokenRule::new(r"--.*$", comment_color).token_type(TokenType::Comment),
                 TokenRule::new(r"#.*$", comment_color).token_type(TokenType::Comment),
                 // Strings — double + single quoted with `\` escape.
-                TokenRule::new(r#""(?:[^"\\]|\\.)*""#, string_color)
-                    .token_type(TokenType::String),
-                TokenRule::new(r#"'(?:[^'\\]|\\.)*'"#, string_color)
-                    .token_type(TokenType::String),
+                TokenRule::new(r#""(?:[^"\\]|\\.)*""#, string_color).token_type(TokenType::String),
+                TokenRule::new(r#"'(?:[^'\\]|\\.)*'"#, string_color).token_type(TokenType::String),
                 // Numbers — integer / float / scientific / hex.
                 TokenRule::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?\b", number_color)
                     .token_type(TokenType::Number),

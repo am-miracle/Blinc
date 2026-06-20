@@ -397,10 +397,12 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                                 // Bone::parent-only path miss those
                                 // transforms and plants the character
                                 // at origin with wrong scale.
-                                let sd = blinc_game_kit::skeleton::scene_skinning_data(&scene_mut, skel);
+                                let sd =
+                                    blinc_game_kit::skeleton::scene_skinning_data(&scene_mut, skel);
                                 // Separately sample morph weights —
                                 // no Pose needed for that side-table.
-                                let morphs = blinc_game_kit::skeleton::animate_scene_morph_weights(anim, t);
+                                let morphs =
+                                    blinc_game_kit::skeleton::animate_scene_morph_weights(anim, t);
                                 (Some(sd), morphs)
                             }
                             None => (None, std::collections::HashMap::new()),

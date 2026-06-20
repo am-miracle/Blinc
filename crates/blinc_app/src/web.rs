@@ -2523,9 +2523,9 @@ impl WebApp {
                 Some(t) => now.saturating_sub(t) > WHEEL_BURST_GAP_MS,
             };
             if is_burst_start {
-                self.blinc_app.invalidate_render_cache_tagged("wheel_burst_start");
                 self.blinc_app
-                    .drain_all_layer_textures("wheel_burst_start");
+                    .invalidate_render_cache_tagged("wheel_burst_start");
+                self.blinc_app.drain_all_layer_textures("wheel_burst_start");
                 self.last_scroll_invalidate_ms = Some(now);
             }
         }

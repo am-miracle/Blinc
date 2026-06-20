@@ -242,7 +242,10 @@ impl PortalSignals {
             // Phase the sinusoid by a hash of the node id so
             // duplicate sources don't share a series. Same shape,
             // different start.
-            let phase = (id.as_str().bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))
+            let phase = (id
+                .as_str()
+                .bytes()
+                .fold(0u32, |a, b| a.wrapping_add(b as u32))
                 % 360) as f32
                 * std::f32::consts::PI
                 / 180.0;
@@ -258,7 +261,10 @@ impl PortalSignals {
     }
     fn histogram_buckets_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<Vec<f32>> {
         per_node(&self.histogram_buckets, id, || {
-            let phase = (id.as_str().bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))
+            let phase = (id
+                .as_str()
+                .bytes()
+                .fold(0u32, |a, b| a.wrapping_add(b as u32))
                 % 360) as f32
                 * std::f32::consts::PI
                 / 180.0;
@@ -273,7 +279,10 @@ impl PortalSignals {
     fn pie_weights_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<Vec<f32>> {
         per_node(&self.pie_weights, id, || {
             // Deterministic-but-varied slice mix per node id.
-            let mut seed = id.as_str().bytes().fold(1u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            let mut seed = id
+                .as_str()
+                .bytes()
+                .fold(1u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
             (0..5)
                 .map(|_| {
                     seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
@@ -420,20 +429,22 @@ fn open_color_picker_popover(
                             hex_signal_for_change.set(new_val.to_string());
                         }),
                 )
-                .child(
-                    div().w_full().flex_row().justify_end().child(
-                        blinc_cn::button("Done").on_click(move |_| {
-                            // Close the overlay via its stable handle
-                            // id. The popover's `on_close` callback
-                            // runs once on close and unregisters the
-                            // click_outside entry, so we don't double-
-                            // unregister here.
-                            if let Ok(mut stack) = overlay_stack().lock() {
-                                stack.close(blinc_layout::widgets::overlay_stack::OverlayHandle::from_raw(next_id));
-                            }
-                        }),
-                    ),
-                )
+                .child(div().w_full().flex_row().justify_end().child(
+                    blinc_cn::button("Done").on_click(move |_| {
+                        // Close the overlay via its stable handle
+                        // id. The popover's `on_close` callback
+                        // runs once on close and unregisters the
+                        // click_outside entry, so we don't double-
+                        // unregister here.
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.close(
+                                blinc_layout::widgets::overlay_stack::OverlayHandle::from_raw(
+                                    next_id,
+                                ),
+                            );
+                        }
+                    }),
+                ))
         })
         .show();
 
@@ -553,57 +564,65 @@ fn open_script_editor_popover(
                         .items_center()
                         .justify_between()
                         .child(blinc_layout::text("{ }").monospace().color(text_muted))
-                        .child(blinc_layout::text(lang_for_header).monospace().color(text_muted)),
+                        .child(
+                            blinc_layout::text(lang_for_header)
+                                .monospace()
+                                .color(text_muted),
+                        ),
                 )
                 // Editor body — wrapped in a flex_row + overflow_clip
                 // + rounded container per `code_demo.rs`'s canonical
                 // pattern. The wrapper owns the chrome; the editor
                 // fills it via `.w_full()`.
                 .child(
-                    div().flex_row().w_full().h(280.0).overflow_clip().rounded(6.0).child(
-                        code_editor(&state_for_editor)
-                            .syntax(match lang_for_closure {
-                                "rust" => SyntaxConfig::new(RustHighlighter::new()),
-                                "json" => SyntaxConfig::new(JsonHighlighter::new()),
-                                "lua" => SyntaxConfig::new(LuaHighlighter::new()),
-                                _ => SyntaxConfig::new(PlainHighlighter::new()),
-                            })
-                            .line_numbers(true)
-                            // Default gutter (48 px) is sized for 3-4
-                            // digit line numbers; inline scripts rarely
-                            // pass 50 lines so 32 px gives clean room
-                            // for two digits without the dead-space
-                            // margin on a short script.
-                            .gutter_width(32.0)
-                            .font_size(13.0)
-                            .padding(8.0)
-                            .w_full()
-                            .h(280.0)
-                            .on_change(move |new_src: &str| {
-                                // String equality guard — code_editor
-                                // fires on_change even for no-op
-                                // events (selection-only) on some
-                                // platforms.
-                                if sig_on_change.get() != new_src {
-                                    sig_on_change.set(new_src.to_string());
-                                }
-                            }),
-                    ),
+                    div()
+                        .flex_row()
+                        .w_full()
+                        .h(280.0)
+                        .overflow_clip()
+                        .rounded(6.0)
+                        .child(
+                            code_editor(&state_for_editor)
+                                .syntax(match lang_for_closure {
+                                    "rust" => SyntaxConfig::new(RustHighlighter::new()),
+                                    "json" => SyntaxConfig::new(JsonHighlighter::new()),
+                                    "lua" => SyntaxConfig::new(LuaHighlighter::new()),
+                                    _ => SyntaxConfig::new(PlainHighlighter::new()),
+                                })
+                                .line_numbers(true)
+                                // Default gutter (48 px) is sized for 3-4
+                                // digit line numbers; inline scripts rarely
+                                // pass 50 lines so 32 px gives clean room
+                                // for two digits without the dead-space
+                                // margin on a short script.
+                                .gutter_width(32.0)
+                                .font_size(13.0)
+                                .padding(8.0)
+                                .w_full()
+                                .h(280.0)
+                                .on_change(move |new_src: &str| {
+                                    // String equality guard — code_editor
+                                    // fires on_change even for no-op
+                                    // events (selection-only) on some
+                                    // platforms.
+                                    if sig_on_change.get() != new_src {
+                                        sig_on_change.set(new_src.to_string());
+                                    }
+                                }),
+                        ),
                 )
                 // Footer — Done button right-aligned.
-                .child(
-                    div().w_full().flex_row().justify_end().child(
-                        blinc_cn::button("Done").on_click(move |_| {
-                            if let Ok(mut stack) = overlay_stack().lock() {
-                                stack.close(
-                                    blinc_layout::widgets::overlay_stack::OverlayHandle::from_raw(
-                                        next_id,
-                                    ),
-                                );
-                            }
-                        }),
-                    ),
-                )
+                .child(div().w_full().flex_row().justify_end().child(
+                    blinc_cn::button("Done").on_click(move |_| {
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.close(
+                                blinc_layout::widgets::overlay_stack::OverlayHandle::from_raw(
+                                    next_id,
+                                ),
+                            );
+                        }
+                    }),
+                ))
         })
         .show();
 
@@ -756,12 +775,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(
-                            anchor,
-                            ChartKind::Area,
-                            samples,
-                            node_id.clone(),
-                        );
+                        open_chart_pip_popover(anchor, ChartKind::Area, samples, node_id.clone());
                     }
                 }
                 "src/threshold" => {
@@ -777,12 +791,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(
-                            anchor,
-                            ChartKind::Bar,
-                            buckets,
-                            node_id.clone(),
-                        );
+                        open_chart_pip_popover(anchor, ChartKind::Bar, buckets, node_id.clone());
                     }
                 }
                 "src/radar" => {
@@ -807,12 +816,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(
-                            anchor,
-                            ChartKind::Pie,
-                            axes,
-                            node_id.clone(),
-                        );
+                        open_chart_pip_popover(anchor, ChartKind::Pie, axes, node_id.clone());
                     }
                 }
                 _ => {
@@ -828,12 +832,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(
-                            anchor,
-                            ChartKind::Pie,
-                            weights,
-                            node_id.clone(),
-                        );
+                        open_chart_pip_popover(anchor, ChartKind::Pie, weights, node_id.clone());
                     }
                 }
             }
@@ -963,10 +962,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             ui.horizontal(|ui| {
                 ui.label("decimals");
                 let decimals = sigs.formatter_decimals_for(node_id);
-                ui.numeric_input(&decimals)
-                    .integer()
-                    .range(0.0..8.0)
-                    .show();
+                ui.numeric_input(&decimals).integer().range(0.0..8.0).show();
             });
             ui.label(if sigs.running.get() {
                 "● live"
@@ -1044,17 +1040,14 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 clears_sig.set(count + 1);
             }
 
-            const FORMAT_OPTIONS: &[(&str, &str)] = &[
-                ("text", "Plain text"),
-                ("json", "JSON"),
-                ("yaml", "YAML"),
-            ];
+            const FORMAT_OPTIONS: &[(&str, &str)] =
+                &[("text", "Plain text"), ("json", "JSON"), ("yaml", "YAML")];
             let resp = ui.select_signal(&format_sig, FORMAT_OPTIONS).show();
             if resp.clicked {
                 let anchor = ui.host().rect_to_screen(resp.rect);
                 let fmt = format_sig;
-                let mut menu = blinc_cn::context_menu()
-                    .at(anchor.x(), anchor.y() + anchor.height() + 4.0);
+                let mut menu =
+                    blinc_cn::context_menu().at(anchor.x(), anchor.y() + anchor.height() + 4.0);
                 for (value, label) in FORMAT_OPTIONS {
                     let s = fmt;
                     let v = value.to_string();
@@ -1206,13 +1199,12 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 "sdf/rounded" => blinc_portal_ui::SdfShape::RoundedBox2D,
                 _ => blinc_portal_ui::SdfShape::Box3D,
             };
-            ui.sdf_shape(shape)
-                .rotate_x(0.35)
-                .rotate_y(0.7)
-                .show();
+            ui.sdf_shape(shape).rotate_x(0.35).rotate_y(0.7).show();
         });
 
-    vec![source, filter, formatter, sink, subgraph, noise, texture, sdf]
+    vec![
+        source, filter, formatter, sink, subgraph, noise, texture, sdf,
+    ]
 }
 
 /// Host-side procedural test pattern — radial gradient × grid
@@ -1233,7 +1225,11 @@ fn bake_test_pattern(seed: u32, w: u32, h: u32) -> Vec<u8> {
             let dx = x as f32 - cx;
             let dy = y as f32 - cy;
             let r = (dx * dx + dy * dy).sqrt() / max_r;
-            let grid = if (x % 16 == 0) || (y % 16 == 0) { 0.15 } else { 0.0 };
+            let grid = if (x % 16 == 0) || (y % 16 == 0) {
+                0.15
+            } else {
+                0.0
+            };
             let v = (1.0 - r).clamp(0.0, 1.0) * 0.85 + grid;
             // Hue rotation around the ring.
             let hue = (hue_base + r * 240.0) % 360.0;
@@ -1336,8 +1332,7 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
         // SDF shapes — five variants spaced 220 px apart, y=1180
         // (340 px below the noise row top to clear the noise
         // bodies' ~250 px height).
-        NodeInstance::new("sdf/box", "sdf", Point::new(80.0, 1180.0))
-            .with_subtitle("Box (3D)"),
+        NodeInstance::new("sdf/box", "sdf", Point::new(80.0, 1180.0)).with_subtitle("Box (3D)"),
         NodeInstance::new("sdf/sphere", "sdf", Point::new(300.0, 1180.0))
             .with_subtitle("Sphere (3D)"),
         NodeInstance::new("sdf/torus", "sdf", Point::new(520.0, 1180.0))

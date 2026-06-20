@@ -260,7 +260,8 @@ impl AsyncHandle {
                 let opts = blinc_game_kit::gltf::LoadOptions {
                     max_texture_size: Some(2048),
                 };
-                match blinc_game_kit::gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
+                match blinc_game_kit::gltf::load_asset_with_options_async(path, &opts, |_| {}).await
+                {
                     Ok(scene) => {
                         register_scheduler_tick();
                         let _ = slot.set(SceneState::from_scene(scene));

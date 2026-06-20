@@ -200,7 +200,8 @@ impl AsyncHandle {
                 let opts = blinc_game_kit::gltf::LoadOptions {
                     max_texture_size: Some(2048),
                 };
-                match blinc_game_kit::gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
+                match blinc_game_kit::gltf::load_asset_with_options_async(path, &opts, |_| {}).await
+                {
                     Ok(scene) => {
                         register_scheduler_tick();
                         let _ = slot.set(SceneState::from_scene(scene));
@@ -361,8 +362,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                         blinc_game_kit::skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
                         match scene_mut.skeletons.first() {
                             Some(skel) => {
-                                let sd = blinc_game_kit::skeleton::scene_skinning_data(&scene_mut, skel);
-                                let morphs = blinc_game_kit::skeleton::animate_scene_morph_weights(anim, t);
+                                let sd =
+                                    blinc_game_kit::skeleton::scene_skinning_data(&scene_mut, skel);
+                                let morphs =
+                                    blinc_game_kit::skeleton::animate_scene_morph_weights(anim, t);
                                 (Some(sd), morphs)
                             }
                             None => (None, std::collections::HashMap::new()),
