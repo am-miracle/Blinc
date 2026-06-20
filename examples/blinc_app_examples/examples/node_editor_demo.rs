@@ -163,6 +163,7 @@ fn signals() -> &'static PortalSignals {
         histogram_buckets: Default::default(),
         pie_weights: Default::default(),
         radar_axes: Default::default(),
+        wave_buffers: Default::default(),
     })
 }
 
@@ -214,6 +215,9 @@ struct PortalSignals {
     pie_weights: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
     /// Radar / spider chart axes — drives `ui.radar_chart(...)`.
     radar_axes: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
+    /// Wave-scope sample buffers — signed-amplitude audio-style
+    /// time series in `[-1, 1]`. Drives `ui.wave_graph(...)`.
+    wave_buffers: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<Vec<f32>>>>,
 }
 
 impl PortalSignals {
@@ -304,6 +308,31 @@ impl PortalSignals {
                     0.2 + ((seed >> 16) as f32 / 65535.0) * 0.8
                 })
                 .collect()
+        })
+    }
+    /// 256-sample signed waveform in `[-1, 1]` — a tone + a softer
+    /// harmonic + a slow tremolo, phase-shifted per id so multiple
+    /// instances of the wave template don't share an identical
+    /// trace. Static data; the wave-graph widget paints it as a
+    /// fixed scope without a live tick loop.
+    fn wave_buffer_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<Vec<f32>> {
+        per_node(&self.wave_buffers, id, || {
+            let phase = (id
+                .as_str()
+                .bytes()
+                .fold(0u32, |a, b| a.wrapping_add(b as u32))
+                % 360) as f32
+                * std::f32::consts::PI
+                / 180.0;
+            let mut v = Vec::with_capacity(256);
+            for i in 0..256 {
+                let t = i as f32 / 255.0;
+                let fundamental = (t * std::f32::consts::TAU * 3.0 + phase).sin();
+                let harmonic = (t * std::f32::consts::TAU * 7.0 + phase).sin() * 0.25;
+                let tremolo = 0.85 + 0.15 * (t * std::f32::consts::TAU * 0.5).sin();
+                v.push(((fundamental + harmonic) * tremolo).clamp(-1.0, 1.0));
+            }
+            v
         })
     }
 }
@@ -1202,8 +1231,42 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             ui.sdf_shape(shape).rotate_x(0.35).rotate_y(0.7).show();
         });
 
+    // Wave-scope template — signed-amplitude oscilloscope plot.
+    // Three variants keyed by node id: stroke (bare line),
+    // filled (line + symmetric fill), mirrored (envelope above +
+    // reflected below). Same square-aspect convention as the
+    // other display portals.
+    let wave = NodeTemplate::<DemoPort>::new("wave", "Wave scope")
+        .with_category("display")
+        .with_subtitle("Audio-style oscilloscope")
+        .with_icon(tabler_icon(outline::WAVE_SAW_TOOL))
+        .with_input(
+            PortDesc::new("in_num", "value", Direction::Input, DemoPort::Number)
+                .with_description("Signed sample stream — typically a tone or LFO"),
+        )
+        .with_output(
+            PortDesc::new("out_num", "level", Direction::Output, DemoPort::Number)
+                .with_description("Peak amplitude over the visible window"),
+        )
+        .with_content_size(180.0, 180.0, |node_id, ui| {
+            let sigs = signals();
+            let buffer = sigs.wave_buffer_for(node_id);
+            let style = match node_id.as_str() {
+                "wave/filled" => blinc_portal_ui::WaveStyle::Filled,
+                "wave/mirrored" => blinc_portal_ui::WaveStyle::Mirrored,
+                _ => blinc_portal_ui::WaveStyle::Stroke,
+            };
+            ui.wave_graph(&buffer)
+                .style(style)
+                .y_range(-1.0..1.0)
+                .grid_divisions(2)
+                .line_width(1.25)
+                .pip(true)
+                .show();
+        });
+
     vec![
-        source, filter, formatter, sink, subgraph, noise, texture, sdf,
+        source, filter, formatter, sink, subgraph, noise, texture, sdf, wave,
     ]
 }
 
@@ -1341,6 +1404,16 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_subtitle("Cylinder (3D)"),
         NodeInstance::new("sdf/rounded", "sdf", Point::new(960.0, 1180.0))
             .with_subtitle("Rounded box (2D)"),
+        // Wave-scope row — three variants of the WaveGraphBuilder
+        // widget on a new row below the SDF band. Collision-resolve
+        // will nudge any residual overlap with the row above on
+        // first paint; positions here are first-paint approximations.
+        NodeInstance::new("wave/stroke", "wave", Point::new(80.0, 1480.0))
+            .with_subtitle("Stroke style"),
+        NodeInstance::new("wave/filled", "wave", Point::new(360.0, 1480.0))
+            .with_subtitle("Filled style"),
+        NodeInstance::new("wave/mirrored", "wave", Point::new(640.0, 1480.0))
+            .with_subtitle("Mirrored envelope"),
     ]
 }
 
