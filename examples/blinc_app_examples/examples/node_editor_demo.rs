@@ -734,7 +734,17 @@ fn open_chart_pip_popover(
             // through `blinc_layout::canvas` + a closure that
             // paints the series at the expanded size.
             let sig = signal_for_content;
-            let _kind = kind;
+            let kind = kind;
+            // Expanded chart paint. portal_ui's chart widgets need a
+            // Portal::frame context (not available inside a host
+            // overlay Div), so we use the pure paint helpers
+            // (`paint_chart` / `paint_pie`) over a
+            // `PortalPainter::for_host` built from the canvas's
+            // DrawContext. Same render core the inline sparkline
+            // uses, just larger.
+            const PLOT_W: f32 = EST_W - 32.0;
+            const PLOT_H: f32 = 200.0;
+            let chart_sig = sig;
             div()
                 .id(&popover_id_for_content)
                 .flex_col()
@@ -747,13 +757,64 @@ fn open_chart_pip_popover(
                 .p_px(8.0)
                 .shadow_lg()
                 .child(blinc_layout::text(title).color(text_muted))
-                // Inline label for now — the expanded chart paint
-                // is the next refinement (the chart widget can't
-                // be hosted inside a popover Div directly since
-                // portal_ui requires a Portal::frame context).
                 .child(
-                    blinc_layout::text(format!("{} samples", sig.get().len()))
-                        .color(blinc_theme::ThemeState::get().color(ColorToken::TextPrimary)),
+                    blinc_layout::canvas(move |ctx, bounds| {
+                        let data = chart_sig.get();
+                        let style = blinc_portal_ui::PortalStyle::from_active_theme();
+                        let mut p = blinc_portal_ui::PortalPainter::for_host(
+                            ctx,
+                            blinc_core::layer::Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                            0.0,
+                        );
+                        let plot =
+                            blinc_core::layer::Rect::new(0.0, 0.0, bounds.width, bounds.height);
+                        match kind {
+                            ChartKind::Area => blinc_portal_ui::paint_chart(
+                                &mut p,
+                                plot,
+                                &data,
+                                &blinc_portal_ui::ChartPaint {
+                                    variant: blinc_portal_ui::ChartVariant::Area,
+                                    show_baseline: true,
+                                    show_latest: true,
+                                    line_width: 2.0,
+                                    ..Default::default()
+                                },
+                                &style,
+                            ),
+                            ChartKind::Bar => blinc_portal_ui::paint_chart(
+                                &mut p,
+                                plot,
+                                &data,
+                                &blinc_portal_ui::ChartPaint {
+                                    variant: blinc_portal_ui::ChartVariant::Bar,
+                                    y_range: Some(0.0..1.0),
+                                    bar_gap: 3.0,
+                                    ..Default::default()
+                                },
+                                &style,
+                            ),
+                            ChartKind::Pie => {
+                                let r = (bounds.width.min(bounds.height) * 0.5) - 4.0;
+                                blinc_portal_ui::paint_pie(
+                                    &mut p,
+                                    blinc_core::layer::Point::new(
+                                        bounds.width * 0.5,
+                                        bounds.height * 0.5,
+                                    ),
+                                    r,
+                                    &data,
+                                    &blinc_portal_ui::PiePaint {
+                                        inner_ratio: 0.55,
+                                        ..Default::default()
+                                    },
+                                    &style,
+                                );
+                            }
+                        }
+                    })
+                    .w(PLOT_W)
+                    .h(PLOT_H),
                 )
         })
         .show();
