@@ -715,6 +715,12 @@ fn open_chart_pip_popover(
     // the signal + kind by clone so the chart paints inside.
     let signal_for_content = signal;
     let title_for_content = title_text.clone();
+    // Per-popover hover cursor (canvas-local px), fed by the
+    // chart wrapper's on_mouse_move and read by the canvas to
+    // drive the chart tooltip. `Signal` is Copy, so it threads
+    // into all three closures cheaply.
+    let cursor: blinc_core::reactive::Signal<Option<(f32, f32)>> =
+        blinc_core::reactive::signal(None);
 
     let handle = OverlayBuilder::popover()
         .at(anchor.x(), anchor.y() + anchor.height() + 4.0)
@@ -758,63 +764,94 @@ fn open_chart_pip_popover(
                 .shadow_lg()
                 .child(blinc_layout::text(title).color(text_muted))
                 .child(
-                    blinc_layout::canvas(move |ctx, bounds| {
-                        let data = chart_sig.get();
-                        let style = blinc_portal_ui::PortalStyle::from_active_theme();
-                        let mut p = blinc_portal_ui::PortalPainter::for_host(
-                            ctx,
-                            blinc_core::layer::Rect::new(0.0, 0.0, bounds.width, bounds.height),
-                            0.0,
-                        );
-                        let plot =
-                            blinc_core::layer::Rect::new(0.0, 0.0, bounds.width, bounds.height);
-                        match kind {
-                            ChartKind::Area => blinc_portal_ui::paint_chart(
-                                &mut p,
-                                plot,
-                                &data,
-                                &blinc_portal_ui::ChartPaint {
-                                    variant: blinc_portal_ui::ChartVariant::Area,
-                                    show_baseline: true,
-                                    show_latest: true,
-                                    line_width: 2.0,
-                                    ..Default::default()
-                                },
-                                &style,
-                            ),
-                            ChartKind::Bar => blinc_portal_ui::paint_chart(
-                                &mut p,
-                                plot,
-                                &data,
-                                &blinc_portal_ui::ChartPaint {
-                                    variant: blinc_portal_ui::ChartVariant::Bar,
-                                    y_range: Some(0.0..1.0),
-                                    bar_gap: 3.0,
-                                    ..Default::default()
-                                },
-                                &style,
-                            ),
-                            ChartKind::Pie => {
-                                let r = (bounds.width.min(bounds.height) * 0.5) - 4.0;
-                                blinc_portal_ui::paint_pie(
-                                    &mut p,
-                                    blinc_core::layer::Point::new(
-                                        bounds.width * 0.5,
-                                        bounds.height * 0.5,
+                    // Wrapper div sized exactly to the canvas so its
+                    // on_mouse_move local coords ARE canvas-local —
+                    // feed them to the chart tooltip via `cursor`.
+                    div()
+                        .w(PLOT_W)
+                        .h(PLOT_H)
+                        .on_mouse_move(move |ctx| {
+                            cursor.set(Some((ctx.local_x, ctx.local_y)));
+                            blinc_layout::request_redraw();
+                        })
+                        .on_hover_leave(move |_| {
+                            cursor.set(None);
+                            blinc_layout::request_redraw();
+                        })
+                        .child(
+                            blinc_layout::canvas(move |ctx, bounds| {
+                                let data = chart_sig.get();
+                                let cur = cursor
+                                    .get()
+                                    .map(|(x, y)| blinc_core::layer::Point::new(x, y));
+                                let style = blinc_portal_ui::PortalStyle::from_active_theme();
+                                let mut p = blinc_portal_ui::PortalPainter::for_host(
+                                    ctx,
+                                    blinc_core::layer::Rect::new(
+                                        0.0,
+                                        0.0,
+                                        bounds.width,
+                                        bounds.height,
                                     ),
-                                    r,
-                                    &data,
-                                    &blinc_portal_ui::PiePaint {
-                                        inner_ratio: 0.55,
-                                        ..Default::default()
-                                    },
-                                    &style,
+                                    0.0,
                                 );
-                            }
-                        }
-                    })
-                    .w(PLOT_W)
-                    .h(PLOT_H),
+                                let plot = blinc_core::layer::Rect::new(
+                                    0.0,
+                                    0.0,
+                                    bounds.width,
+                                    bounds.height,
+                                );
+                                match kind {
+                                    ChartKind::Area => blinc_portal_ui::paint_chart(
+                                        &mut p,
+                                        plot,
+                                        &data,
+                                        &blinc_portal_ui::ChartPaint {
+                                            variant: blinc_portal_ui::ChartVariant::Area,
+                                            show_baseline: true,
+                                            show_latest: true,
+                                            line_width: 2.0,
+                                            tooltip_cursor: cur,
+                                            ..Default::default()
+                                        },
+                                        &style,
+                                    ),
+                                    ChartKind::Bar => blinc_portal_ui::paint_chart(
+                                        &mut p,
+                                        plot,
+                                        &data,
+                                        &blinc_portal_ui::ChartPaint {
+                                            variant: blinc_portal_ui::ChartVariant::Bar,
+                                            y_range: Some(0.0..1.0),
+                                            bar_gap: 3.0,
+                                            tooltip_cursor: cur,
+                                            ..Default::default()
+                                        },
+                                        &style,
+                                    ),
+                                    ChartKind::Pie => {
+                                        let r = (bounds.width.min(bounds.height) * 0.5) - 4.0;
+                                        blinc_portal_ui::paint_pie(
+                                            &mut p,
+                                            blinc_core::layer::Point::new(
+                                                bounds.width * 0.5,
+                                                bounds.height * 0.5,
+                                            ),
+                                            r,
+                                            &data,
+                                            &blinc_portal_ui::PiePaint {
+                                                inner_ratio: 0.55,
+                                                tooltip_cursor: cur,
+                                                ..Default::default()
+                                            },
+                                            &style,
+                                        );
+                                    }
+                                }
+                            })
+                            .w(PLOT_W)
+                            .h(PLOT_H),
+                        ),
                 )
         })
         .show();
