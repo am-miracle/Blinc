@@ -158,6 +158,8 @@ fn signals() -> &'static PortalSignals {
         sink_label: Default::default(),
         sink_fill: Default::default(),
         sink_script: Default::default(),
+        sink_notes: Default::default(),
+        sink_file: Default::default(),
         formatter_decimals: Default::default(),
         source_samples: Default::default(),
         histogram_buckets: Default::default(),
@@ -201,6 +203,10 @@ struct PortalSignals {
     sink_fill: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
     /// Sink node's Lua transform script.
     sink_script: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
+    /// Sink node's free-text notes — drives `ui.textarea(...)`.
+    sink_notes: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
+    /// Sink node's output file path — drives `ui.file_picker(...)`.
+    sink_file: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<String>>>,
     /// Formatter node's `decimals` config (per instance so two
     /// formatters can have different precisions).
     formatter_decimals: Mutex<HashMap<NodeId, blinc_core::reactive::Signal<f32>>>,
@@ -232,6 +238,12 @@ impl PortalSignals {
     }
     fn sink_fill_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
         per_node(&self.sink_fill, id, || "#3b82f6".to_string())
+    }
+    fn sink_notes_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
+        per_node(&self.sink_notes, id, String::new)
+    }
+    fn sink_file_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
+        per_node(&self.sink_file, id, String::new)
     }
     fn sink_script_for(&self, id: &NodeId) -> blinc_core::reactive::Signal<String> {
         per_node(&self.sink_script, id, || {
@@ -1207,7 +1219,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         // edge) and fed back through `apply_portal_width_override`
         // so the chrome grows to fit the actual chips. One-frame
         // narrow flash on first paint; stable thereafter.
-        .with_content(160.0, |node_id, ui| {
+        .with_content(250.0, |node_id, ui| {
             let sigs = signals();
             let label_sig = sigs.sink_label_for(node_id);
             let clears_sig = sigs.sink_clears_for(node_id);
@@ -1269,6 +1281,21 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             if script_resp.clicked {
                 let anchor = ui.host().rect_to_screen(script_resp.rect);
                 open_script_editor_popover(anchor, script_sig, Some("lua"));
+            }
+
+            // Multi-line notes — exercises the textarea widget
+            // (Enter = newline, Up/Down between lines).
+            ui.label("notes:");
+            let notes_sig = sigs.sink_notes_for(node_id);
+            ui.textarea(&notes_sig).rows(2).placeholder("Notes…").show();
+
+            // Output path — file_picker trigger. The host would open
+            // a native dialog on click; here we just stamp a demo
+            // path so the chip shows a base name.
+            let file_sig = sigs.sink_file_for(node_id);
+            let file_resp = ui.file_picker(&file_sig).placeholder("Output file…").show();
+            if file_resp.clicked {
+                file_sig.set("/exports/sink_output.json".to_string());
             }
         });
 
