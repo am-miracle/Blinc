@@ -5,11 +5,11 @@
   3D content into a `canvas()`. Same primitive demos use for a
   single spinning cube scale up to a full character rig
   unchanged.
-- [`blinc_gltf`] — glTF 2.0 loader. Parses the file tree once at
+- [`blinc_game_kit::gltf`] — glTF 2.0 loader. Parses the file tree once at
   startup into a `GltfScene` (meshes, nodes, skeletons,
   animation clips) that the demo holds behind an `Arc<Mutex<>>`
   and borrows per frame.
-- [`blinc_skeleton`] — runtime poser. `animate_scene_nodes`
+- [`blinc_game_kit::skeleton`] — runtime poser. `animate_scene_nodes`
   samples the clip's TRS channels into the live node tree;
   `scene_skinning_data` walks the posed tree to build the joint
   matrices the mesh shader consumes;
@@ -45,8 +45,8 @@ cargo run -p blinc_app_examples --example strangler_demo \
 ```
 
 [`blinc_canvas_kit::SceneKit3D`]: https://docs.rs/blinc_canvas_kit/latest/blinc_canvas_kit/struct.SceneKit3D.html
-[`blinc_gltf`]: https://github.com/project-blinc/blinc_gltf
-[`blinc_skeleton`]: https://github.com/project-blinc/blinc_skeleton
+[`blinc_game_kit`]: https://github.com/project-blinc/blinc_game_kit
+[`blinc_game_kit`]: https://github.com/project-blinc/blinc_game_kit
 
 <iframe
   src="../../examples/strangler_demo/index.html"

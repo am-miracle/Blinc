@@ -144,7 +144,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // / `DivInputExt` / the gamepad types since the blinc_input absorption
         // — wrappers that use `blinc_canvas_kit::InputState` resolve through
         // this single entry.
-        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "8347d7d97d3932da7bb80b28ca8eec1f9a01679f" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "da0d0540b82a0dc940351abf957a0499f4e9da11" }"#,
     ),
     (
         "blinc_gpu::",
@@ -208,14 +208,14 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     // them. Pin to the same git revs the workspace's
     // `examples/blinc_app_examples/Cargo.toml` uses; bump in lockstep.
     (
-        "blinc_gltf::",
-        "blinc_gltf",
-        r#"{ git = "https://github.com/project-blinc/blinc_gltf.git", rev = "1c1e7105bec95faa4e9f13cb25d2548113149b14", features = ["platform-assets"] }"#,
-    ),
-    (
-        "blinc_skeleton::",
-        "blinc_skeleton",
-        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "4cd786055f0b4649b23b96934778c2fad8ac8d65" }"#,
+        "blinc_game_kit::",
+        "blinc_game_kit",
+        // Merged glTF loader + runtime skeleton poser (replaces the
+        // retired separate `blinc_gltf` + `blinc_skeleton` repos).
+        // Same API behind the `gltf::` / `skeleton::` sub-modules.
+        // Features flow through from the example crate's `gltf`
+        // feature: platform-assets + bc-encode.
+        r#"{ git = "https://github.com/project-blinc/blinc_game_kit.git", rev = "66f2409d14035e667f7c77dc04dd7eee1c739e5f", features = ["platform-assets", "bc-encode"] }"#,
     ),
     (
         "blinc_node_editor::",
@@ -224,7 +224,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // repo (`github.com/project-blinc/blinc_node_editor`) and is
         // pinned to the same rev `examples/blinc_app_examples/Cargo.toml`
         // uses. Bump in lockstep.
-        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "3b9530065485ea60fbc0fce2bc212f691ce9650f" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "59eabefd1da9f0e4ae1aa65035f178c84b91481a" }"#,
     ),
     (
         "blinc_portal_ui::",
@@ -232,7 +232,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // Immediate-mode widget toolkit pulled by node_editor_demo for
         // its node body closures. Same downstream-repo pattern as
         // canvas_kit / node_editor — pinned to the workspace rev.
-        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "d8f1f760eb058fdbf822ba16ecee9e23c0c0a066" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "3e7e74b2b7baa6d9b489b83c9c352e0e83c1bca4" }"#,
     ),
     // `blinc_input` was absorbed into `blinc_canvas_kit::input` and the
     // standalone repo archived. Demos that previously imported

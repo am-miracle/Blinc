@@ -4,7 +4,7 @@ Loads Poly Haven's `marble_cliff_02` asset (CC0) — a displaced
 rock chunk with a tiling PBR material — and showcases the
 `KHR_texture_transform` glTF extension support added in
 `blinc_core::TextureTransform` + `blinc_gpu::mesh_pipeline` +
-`blinc_gltf::parse_material`.
+`blinc_game_kit::gltf::parse_material`.
 
 The asset's glTF JSON was patched to include
 `"extensions": { "KHR_texture_transform": { "scale": [3, 3] } }`

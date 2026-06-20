@@ -1,7 +1,7 @@
 # Skeleton animation with glTF + `blinc_canvas_kit`.
 
 Loads Sketchfab's buster_drone (39 meshes, 92 nodes, one 25-second
-`Start_Liftoff` clip), runs the clip through `blinc_skeleton` each
+`Start_Liftoff` clip), runs the clip through `blinc_game_kit::skeleton` each
 frame, and renders the result with `SceneKit3D`. Asset load is
 non-blocking: the UI paints a loading overlay while a background
 thread parses the glTF, then flips a `scene_ready` signal that
