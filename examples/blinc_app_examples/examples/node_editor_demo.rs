@@ -671,6 +671,7 @@ enum ChartKind {
     Area,
     Bar,
     Pie,
+    Radar,
 }
 
 /// Open an expanded chart popover anchored under the inline
@@ -685,6 +686,9 @@ fn open_chart_pip_popover(
     kind: ChartKind,
     signal: blinc_core::reactive::Signal<Vec<f32>>,
     node_id: NodeId,
+    // Axis labels — only meaningful for `ChartKind::Radar`; pass an
+    // empty vec for the other kinds.
+    labels: Vec<String>,
 ) {
     use blinc_layout::overlay_state::overlay_stack;
     use blinc_layout::widgets::overlay::AnchorDirection;
@@ -709,7 +713,9 @@ fn open_chart_pip_popover(
         ChartKind::Area => format!("Samples — {}", node_id.as_str()),
         ChartKind::Bar => format!("Buckets — {}", node_id.as_str()),
         ChartKind::Pie => format!("Mix — {}", node_id.as_str()),
+        ChartKind::Radar => format!("Telemetry — {}", node_id.as_str()),
     };
+    let labels_for_content = labels;
 
     // The popover content closure runs each rebuild; capture
     // the signal + kind by clone so the chart paints inside.
@@ -741,6 +747,7 @@ fn open_chart_pip_popover(
             // paints the series at the expanded size.
             let sig = signal_for_content;
             let kind = kind;
+            let labels = labels_for_content.clone();
             // Expanded chart paint. portal_ui's chart widgets need a
             // Portal::frame context (not available inside a host
             // overlay Div), so we use the pure paint helpers
@@ -847,6 +854,28 @@ fn open_chart_pip_popover(
                                             &style,
                                         );
                                     }
+                                    ChartKind::Radar => {
+                                        // Leave a label margin so the
+                                        // axis names clear the ring.
+                                        let r = (bounds.width.min(bounds.height) * 0.5) - 28.0;
+                                        blinc_portal_ui::paint_radar(
+                                            &mut p,
+                                            blinc_core::layer::Point::new(
+                                                bounds.width * 0.5,
+                                                bounds.height * 0.5,
+                                            ),
+                                            r,
+                                            &data,
+                                            &blinc_portal_ui::RadarPaint {
+                                                labels: Some(labels.clone()),
+                                                y_range: Some(0.0..1.0),
+                                                show_vertices: true,
+                                                tooltip_cursor: cur,
+                                                ..Default::default()
+                                            },
+                                            &style,
+                                        );
+                                    }
                                 }
                             })
                             .w(PLOT_W)
@@ -902,7 +931,13 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(anchor, ChartKind::Area, samples, node_id.clone());
+                        open_chart_pip_popover(
+                            anchor,
+                            ChartKind::Area,
+                            samples,
+                            node_id.clone(),
+                            Vec::new(),
+                        );
                     }
                 }
                 "src/threshold" => {
@@ -918,7 +953,13 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(anchor, ChartKind::Bar, buckets, node_id.clone());
+                        open_chart_pip_popover(
+                            anchor,
+                            ChartKind::Bar,
+                            buckets,
+                            node_id.clone(),
+                            Vec::new(),
+                        );
                     }
                 }
                 "src/radar" => {
@@ -927,23 +968,34 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                     // via the dataflow so it's an active member
                     // of the pipeline, not a standalone.
                     let axes = sigs.radar_axes_for(node_id);
+                    let radar_labels = vec![
+                        "cpu".to_string(),
+                        "mem".to_string(),
+                        "io".to_string(),
+                        "net".to_string(),
+                        "err".to_string(),
+                        "lat".to_string(),
+                    ];
                     let resp = ui
                         .radar_chart(&axes)
-                        .labels(vec![
-                            "cpu".to_string(),
-                            "mem".to_string(),
-                            "io".to_string(),
-                            "net".to_string(),
-                            "err".to_string(),
-                            "lat".to_string(),
-                        ])
+                        .labels(radar_labels.clone())
                         .y_range(0.0..1.0)
                         .diameter(112.0)
                         .pip(true)
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(anchor, ChartKind::Pie, axes, node_id.clone());
+                        // Was ChartKind::Pie — a leftover from before
+                        // the popover could render a radar. Open the
+                        // real radar so the expanded view matches the
+                        // inline chart + its 6-axis telemetry data.
+                        open_chart_pip_popover(
+                            anchor,
+                            ChartKind::Radar,
+                            axes,
+                            node_id.clone(),
+                            radar_labels,
+                        );
                     }
                 }
                 _ => {
@@ -959,7 +1011,13 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                         .show();
                     if resp.pip_clicked {
                         let anchor = ui.host().rect_to_screen(resp.rect);
-                        open_chart_pip_popover(anchor, ChartKind::Pie, weights, node_id.clone());
+                        open_chart_pip_popover(
+                            anchor,
+                            ChartKind::Pie,
+                            weights,
+                            node_id.clone(),
+                            Vec::new(),
+                        );
                     }
                 }
             }
