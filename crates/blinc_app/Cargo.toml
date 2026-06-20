@@ -197,6 +197,12 @@ web-sys = { version = "0.3", optional = true, features = [
     "Node",
     "Text",
     "AddEventListenerOptions",
+    # File-open fallback (`file_open::open_file_into` on wasm):
+    # an `<input type=file>` element + reading the picked file name.
+    "Event",
+    "HtmlInputElement",
+    "File",
+    "FileList",
 ] }
 console_error_panic_hook = { version = "0.1", optional = true }
 # `web-time` is in the regular `[dependencies]` table because the

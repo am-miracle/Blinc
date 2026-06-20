@@ -165,6 +165,11 @@ pub mod wayland_frame_gate;
 #[cfg(feature = "rfd")]
 pub mod dialog;
 
+/// Cross-platform callback-based file open (`open_file_into`) — works
+/// on desktop (rfd) AND web (`<input type=file>`), unlike the
+/// synchronous desktop-only [`dialog`].
+pub mod file_open;
+
 /// Window state persistence (save/restore position, size, maximized).
 pub mod window_state;
 
