@@ -19,7 +19,7 @@
 //! the loading overlay simply never dismisses and a polite error is
 //! logged. Install instructions live in the asset's README.
 //!
-//! Skinning is wired through `blinc_skeleton::Pose::skinning_data` —
+//! Skinning is wired through `blinc_game_kit::skeleton::Pose::skinning_data` —
 //! every mesh whose node carries a skin index gets a per-frame
 //! `SkinningData`. Cutegirl has a single skeleton shared by all
 //! skinned meshes, so we build one `Pose`/`SkinningData` per frame and
@@ -42,7 +42,7 @@ use blinc_canvas_kit::prelude::*;
 use blinc_canvas_kit::{DivInputExt, InputState};
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
-use blinc_gltf::{GltfAnimation, GltfScene};
+use blinc_game_kit::gltf::{GltfAnimation, GltfScene};
 use blinc_layout::prelude::text;
 use web_time::Instant;
 
@@ -91,10 +91,10 @@ impl SceneState {
     /// overlay stays visible and logs a polite message. On wasm this
     /// also handles the preload race (poll until cache populates).
     fn try_load(path: &str) -> Option<Self> {
-        let opts = blinc_gltf::LoadOptions {
+        let opts = blinc_game_kit::gltf::LoadOptions {
             max_texture_size: Some(2048),
         };
-        let mut scene = match blinc_gltf::load_asset_with_options(path, &opts) {
+        let mut scene = match blinc_game_kit::gltf::load_asset_with_options(path, &opts) {
             Ok(s) => s,
             Err(e) => {
                 // See note in `strangler_demo::SceneState::try_load`:
@@ -116,7 +116,7 @@ impl SceneState {
         // Densify rotations so fast reversals don't slerp the wrong way.
         let mut total_inserted = 0usize;
         for anim in scene.animations.iter_mut() {
-            total_inserted += blinc_skeleton::densify_rotation_channels(anim);
+            total_inserted += blinc_game_kit::skeleton::densify_rotation_channels(anim);
         }
         if total_inserted > 0 {
             tracing::info!("densified rotation channels: {total_inserted} keyframes inserted");
@@ -126,12 +126,12 @@ impl SceneState {
         // have thousands of overlapping alpha triangles with no
         // per-triangle sort, so rendering them as true BLEND flickers
         // badly. MASK gives stable hard-edged strands. This used to
-        // live in blinc_gltf as an automatic heuristic; it was
+        // live in blinc_game_kit::gltf as an automatic heuristic; it was
         // reverted because the same signal (binary alpha) also
         // applies to thin overlay decorators that specifically want
         // to STAY BLEND — no way to disambiguate at the framework
         // layer. Per-asset override is the honest answer.
-        blinc_gltf::apply_material_overrides(&mut scene, |_, name, _, mat| {
+        blinc_game_kit::gltf::apply_material_overrides(&mut scene, |_, name, _, mat| {
             let is_hair = name.is_some_and(|n| n.contains("Hair"));
             if is_hair && mat.alpha_mode == blinc_core::AlphaMode::Blend {
                 mat.alpha_mode = blinc_core::AlphaMode::Mask;
@@ -149,7 +149,7 @@ impl SceneState {
         const ROUGHEN_FACE_SKIN: bool = true;
         const FACE_MESH_INDEX: usize = 1;
         if ROUGHEN_FACE_SKIN {
-            blinc_gltf::apply_material_overrides(&mut scene, |mesh_idx, _, _, mat| {
+            blinc_game_kit::gltf::apply_material_overrides(&mut scene, |mesh_idx, _, _, mat| {
                 if mesh_idx == FACE_MESH_INDEX {
                     mat.roughness = 0.9;
                 }
@@ -382,7 +382,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                 let mut scene_mut = state.scene.lock().unwrap();
                 let (skinning, weights_by_node) = match state.animation.as_ref().as_ref() {
                     Some(anim) => {
-                        blinc_skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
+                        blinc_game_kit::skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
                         // One skeleton — assume every skinned mesh in
                         // the scene shares it (true for cutegirl and
                         // most character exports). Multi-skin assets
@@ -397,10 +397,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                                 // Bone::parent-only path miss those
                                 // transforms and plants the character
                                 // at origin with wrong scale.
-                                let sd = blinc_skeleton::scene_skinning_data(&scene_mut, skel);
+                                let sd = blinc_game_kit::skeleton::scene_skinning_data(&scene_mut, skel);
                                 // Separately sample morph weights —
                                 // no Pose needed for that side-table.
-                                let morphs = blinc_skeleton::animate_scene_morph_weights(anim, t);
+                                let morphs = blinc_game_kit::skeleton::animate_scene_morph_weights(anim, t);
                                 (Some(sd), morphs)
                             }
                             None => (None, std::collections::HashMap::new()),

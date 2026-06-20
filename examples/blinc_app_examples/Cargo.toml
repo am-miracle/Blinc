@@ -44,8 +44,11 @@ tabler-icons = ["dep:blinc_tabler_icons"]
 icons = ["dep:blinc_icons"]
 
 # glTF model loading + skeletal animation. Implies `canvas` because
-# every glTF demo renders through canvas_kit's 3D pipeline.
-gltf = ["canvas", "dep:blinc_gltf", "dep:blinc_skeleton"]
+# every glTF demo renders through canvas_kit's 3D pipeline. The two
+# former crates (`blinc_gltf` + `blinc_skeleton`) merged into
+# `blinc_game_kit` — same API behind the `gltf::` / `skeleton::`
+# sub-modules.
+gltf = ["canvas", "dep:blinc_game_kit", "blinc_game_kit/platform-assets", "blinc_game_kit/bc-encode"]
 
 # Experimental hot-reload — forwards to `blinc_app/hot-reload`.
 # Run examples under `dx serve --hotpatch` (see
@@ -108,10 +111,12 @@ blinc_media = { path = "../../crates/blinc_media", optional = true }
 # is optional + gated, and the gitignored `/packages/` directory
 # isn't present.
 blinc_canvas_kit = { git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "da0d0540b82a0dc940351abf957a0499f4e9da11", optional = true }
-blinc_node_editor = { git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "2d117ac53c73964fbf75f5bff5e419d5418cc97c", optional = true }
-blinc_portal_ui = { git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "1e9011f30a87944e1d7b2ce8813d18378013593e", optional = true }
-blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "1c1e7105bec95faa4e9f13cb25d2548113149b14", features = ["platform-assets", "bc-encode"], optional = true }
-blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "4cd786055f0b4649b23b96934778c2fad8ac8d65", optional = true }
+blinc_node_editor = { git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "e8f82cffd0a3a344d78b96b8469974904d284d4c", optional = true }
+blinc_portal_ui = { git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "50e70b1752b4dad156e7d4390182e76b2cc2dcf0", optional = true }
+# `blinc_game_kit` — merged glTF loader (formerly `blinc_gltf`) +
+# runtime skeleton poser (formerly `blinc_skeleton`). Same API behind
+# the `gltf::` / `skeleton::` sub-modules.
+blinc_game_kit = { git = "https://github.com/project-blinc/blinc_game_kit.git", rev = "f13b00569ab9c1faa1b88efd8ca5c5bdbd725693", optional = true }
 
 image.workspace = true
 tracing.workspace = true

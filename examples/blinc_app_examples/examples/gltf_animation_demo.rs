@@ -1,7 +1,7 @@
 //! Skeleton animation with glTF + `blinc_canvas_kit`.
 //!
 //! Loads Sketchfab's buster_drone (39 meshes, 92 nodes, one 25-second
-//! `Start_Liftoff` clip), runs the clip through `blinc_skeleton` each
+//! `Start_Liftoff` clip), runs the clip through `blinc_game_kit::skeleton` each
 //! frame, and renders the result with `SceneKit3D`. Asset load is
 //! non-blocking: the UI paints a loading overlay while a background
 //! thread parses the glTF, then flips a `scene_ready` signal that
@@ -35,7 +35,7 @@ use blinc_canvas_kit::InputState;
 use blinc_canvas_kit::prelude::*;
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
-use blinc_gltf::{GltfAnimation, GltfScene};
+use blinc_game_kit::gltf::{GltfAnimation, GltfScene};
 use blinc_layout::prelude::text;
 use web_time::Instant;
 
@@ -86,10 +86,10 @@ impl SceneState {
     /// both paths converge on [`Self::from_scene`] afterward.
     #[cfg(not(target_arch = "wasm32"))]
     fn try_load(path: &str) -> Option<Self> {
-        let opts = blinc_gltf::LoadOptions {
+        let opts = blinc_game_kit::gltf::LoadOptions {
             max_texture_size: Some(2048),
         };
-        match blinc_gltf::load_asset_with_options(path, &opts) {
+        match blinc_game_kit::gltf::load_asset_with_options(path, &opts) {
             Ok(scene) => Some(Self::from_scene(scene)),
             Err(e) => {
                 tracing::error!("gltf_animation_demo asset not loadable ({e:?})");
@@ -108,7 +108,7 @@ impl SceneState {
         // per keyframe) slerp without picking the wrong hemisphere.
         let mut total_inserted = 0usize;
         for anim in scene.animations.iter_mut() {
-            total_inserted += blinc_skeleton::densify_rotation_channels(anim);
+            total_inserted += blinc_game_kit::skeleton::densify_rotation_channels(anim);
         }
         tracing::info!("densified rotation channels: {total_inserted} keyframes inserted");
 
@@ -249,7 +249,7 @@ impl AsyncHandle {
 
         #[cfg(target_arch = "wasm32")]
         {
-            // `blinc_gltf::load_asset_with_options_async` folds the
+            // `blinc_game_kit::gltf::load_asset_with_options_async` folds the
             // preload-wait + retry-loop pattern this demo used to
             // reimplement. It yields between stages so wasm's
             // single-threaded executor can paint the loading overlay
@@ -257,10 +257,10 @@ impl AsyncHandle {
             // window — especially valuable for buster_drone, whose
             // 4K textures have the highest decode cost of any demo.
             wasm_bindgen_futures::spawn_local(async move {
-                let opts = blinc_gltf::LoadOptions {
+                let opts = blinc_game_kit::gltf::LoadOptions {
                     max_texture_size: Some(2048),
                 };
-                match blinc_gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
+                match blinc_game_kit::gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
                     Ok(scene) => {
                         register_scheduler_tick();
                         let _ = slot.set(SceneState::from_scene(scene));
@@ -432,7 +432,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
             let draws: Vec<(usize, Mat4)> = {
                 let mut scene_mut = state.scene.lock().unwrap();
                 if let Some(anim) = state.animation.as_ref() {
-                    blinc_skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
+                    blinc_game_kit::skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
                 }
                 let world = scene_mut.compute_world_transforms();
                 scene_mut

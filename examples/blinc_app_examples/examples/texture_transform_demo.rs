@@ -4,7 +4,7 @@
 //! rock chunk with a tiling PBR material — and showcases the
 //! `KHR_texture_transform` glTF extension support added in
 //! `blinc_core::TextureTransform` + `blinc_gpu::mesh_pipeline` +
-//! `blinc_gltf::parse_material`.
+//! `blinc_game_kit::gltf::parse_material`.
 //!
 //! The asset's glTF JSON was patched to include
 //! `"extensions": { "KHR_texture_transform": { "scale": [3, 3] } }`
@@ -35,7 +35,7 @@ use blinc_canvas_kit::InputState;
 use blinc_canvas_kit::prelude::*;
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, Light, Mat4, MeshData, State, Vec3};
-use blinc_gltf::GltfScene;
+use blinc_game_kit::gltf::GltfScene;
 
 const GLTF_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/marble_cliff_02_2k.gltf/marble_cliff_02_2k.gltf";
 
@@ -150,10 +150,10 @@ impl AsyncHandle {
 
         #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
-            let opts = blinc_gltf::LoadOptions {
+            let opts = blinc_game_kit::gltf::LoadOptions {
                 max_texture_size: Some(2048),
             };
-            match blinc_gltf::load_asset_with_options(path, &opts) {
+            match blinc_game_kit::gltf::load_asset_with_options(path, &opts) {
                 Ok(scene) => {
                     register_scheduler_tick();
                     let _ = slot.set(SceneState::from_scene(scene));
@@ -166,10 +166,10 @@ impl AsyncHandle {
 
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(async move {
-            let opts = blinc_gltf::LoadOptions {
+            let opts = blinc_game_kit::gltf::LoadOptions {
                 max_texture_size: Some(2048),
             };
-            match blinc_gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
+            match blinc_game_kit::gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
                 Ok(scene) => {
                     register_scheduler_tick();
                     let _ = slot.set(SceneState::from_scene(scene));

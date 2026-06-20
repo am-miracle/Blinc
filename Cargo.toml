@@ -274,3 +274,9 @@ blinc_portal_ui = { path = "packages/blinc_portal_ui" }
 # fresh clones (CI) where `/packages/` isn't present.
 [patch."https://github.com/project-blinc/blinc_node_editor.git"]
 blinc_node_editor = { path = "packages/blinc_node_editor" }
+
+# `blinc_game_kit` — the merged glTF loader + skeleton poser (replaces
+# the former separate `blinc_gltf` + `blinc_skeleton` repos). Same
+# local-dev redirect pattern; stripped on CI.
+[patch."https://github.com/project-blinc/blinc_game_kit.git"]
+blinc_game_kit = { path = "packages/blinc_game_kit" }
