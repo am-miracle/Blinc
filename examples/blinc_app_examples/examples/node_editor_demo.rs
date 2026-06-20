@@ -1123,21 +1123,25 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             PortDesc::new("in_id", "image", Direction::Input, DemoPort::Number)
                 .with_description("ImageId — wired via host's asset loader"),
         )
-        .with_content(96.0, |node_id, ui| {
+        // 160 × 160 content slot — every display portal (charts,
+        // noise, texture, SDF) declares its natural square via
+        // `with_content_size` so the node grows to fit the content
+        // instead of every template defaulting to the same node
+        // width. Widget defaults to a square inside the slot.
+        .with_content_size(160.0, 160.0, |node_id, ui| {
             // Bake a small RGBA test pattern keyed by node id so
             // duplicate instances paint different palettes.
             let seed = node_id
                 .as_str()
                 .bytes()
                 .fold(11u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-            let buf = bake_test_pattern(seed, 128, 64);
+            let buf = bake_test_pattern(seed, 128, 128);
             ui.texture(blinc_portal_ui::TextureSource::Rgba {
                 data: &buf,
                 width: 128,
-                height: 64,
+                height: 128,
             })
             .cover()
-            .height(60.0)
             .pip(true)
             .show();
         });
@@ -1150,7 +1154,12 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             PortDesc::new("out_num", "value", Direction::Output, DemoPort::Number)
                 .with_description("Sample of the procedural noise field"),
         )
-        .with_content(96.0, |node_id, ui| {
+        // 160 × 184 content slot — 160 for the square noise rect,
+        // plus ~24 px for the label row above it. Declaring the
+        // natural width via `with_content_size` lets the node
+        // grow to fit the content rather than defaulting to a
+        // shared chrome width across every template.
+        .with_content_size(160.0, 184.0, |node_id, ui| {
             let (variant, label) = match node_id.as_str() {
                 "noise/worley" => (blinc_portal_ui::NoiseVariant::Worley, "worley"),
                 "noise/voronoi" => (blinc_portal_ui::NoiseVariant::Voronoi, "voronoi"),
@@ -1168,7 +1177,6 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 .seed(seed)
                 .scale(28.0)
                 .octaves(3)
-                .height(64.0)
                 .pip(true)
                 .show();
         });
@@ -1185,7 +1193,11 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             PortDesc::new("out_num", "depth", Direction::Output, DemoPort::Number)
                 .with_description("Shape's signed-distance sample at the centre"),
         )
-        .with_content(112.0, |node_id, ui| {
+        // 180 × 180 content slot — perfect square. The widget
+        // defaults to a square within the slot; a scissor clip
+        // hard-bounds the SDF eval to that rect so even worst-
+        // case rotation overrides can't bleed past the border.
+        .with_content_size(180.0, 180.0, |node_id, ui| {
             let shape = match node_id.as_str() {
                 "sdf/sphere" => blinc_portal_ui::SdfShape::Sphere3D,
                 "sdf/torus" => blinc_portal_ui::SdfShape::Torus3D,
@@ -1195,10 +1207,8 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 _ => blinc_portal_ui::SdfShape::Box3D,
             };
             ui.sdf_shape(shape)
-                .height(96.0)
                 .rotate_x(0.35)
                 .rotate_y(0.7)
-                .pip(true)
                 .show();
         });
 
@@ -1309,38 +1319,32 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             .with_size(200.0, 140.0)
             .with_subtitle("demo-workflow/sample-sub")
             .with_subgraph_ref(SubgraphId::from("sample-sub")),
-        // Noise generators — one instance per variant. Placed
-        // on a new row at y=820, well below the Transforms
-        // group + the src/radar row (~y=560→730) so they
-        // don't overlap any existing nodes. (Until the layout
-        // system grows collision response — see
-        // `feedback_collision_aware_node_layout` memory entry —
-        // positions are hand-spaced; a real host would auto-
-        // resolve overlaps.)
+        // Noise + texture row at y=820. Initial positions are
+        // approximate — the editor's per-frame collision-resolve
+        // pass (triggered whenever fit-content size changes) will
+        // shove any AABB overlaps apart along the shortest axis
+        // before the second paint, so a slightly tight initial
+        // layout self-corrects.
         NodeInstance::new("noise/perlin", "noise", Point::new(80.0, 820.0))
             .with_subtitle("Perlin fbm"),
         NodeInstance::new("noise/worley", "noise", Point::new(380.0, 820.0))
             .with_subtitle("Worley cells"),
         NodeInstance::new("noise/voronoi", "noise", Point::new(680.0, 820.0))
             .with_subtitle("Voronoi cells"),
-        // Texture viewer — fed by the perlin noise generator's
-        // output as the "ImageId" input. The wiring is symbolic
-        // (the texture's body bakes its own pattern); the
-        // connection demonstrates that texture nodes participate
-        // in the dataflow like every other node.
         NodeInstance::new("tex/preview", "texture", Point::new(980.0, 820.0))
             .with_subtitle("Test pattern"),
-        // SDF shapes — three 3D variants in a new row below the
-        // noise + texture band.
-        NodeInstance::new("sdf/box", "sdf", Point::new(80.0, 1060.0))
+        // SDF shapes — five variants spaced 220 px apart, y=1180
+        // (340 px below the noise row top to clear the noise
+        // bodies' ~250 px height).
+        NodeInstance::new("sdf/box", "sdf", Point::new(80.0, 1180.0))
             .with_subtitle("Box (3D)"),
-        NodeInstance::new("sdf/sphere", "sdf", Point::new(280.0, 1060.0))
+        NodeInstance::new("sdf/sphere", "sdf", Point::new(300.0, 1180.0))
             .with_subtitle("Sphere (3D)"),
-        NodeInstance::new("sdf/torus", "sdf", Point::new(480.0, 1060.0))
+        NodeInstance::new("sdf/torus", "sdf", Point::new(520.0, 1180.0))
             .with_subtitle("Torus (3D)"),
-        NodeInstance::new("sdf/cylinder", "sdf", Point::new(680.0, 1060.0))
+        NodeInstance::new("sdf/cylinder", "sdf", Point::new(740.0, 1180.0))
             .with_subtitle("Cylinder (3D)"),
-        NodeInstance::new("sdf/rounded", "sdf", Point::new(880.0, 1060.0))
+        NodeInstance::new("sdf/rounded", "sdf", Point::new(960.0, 1180.0))
             .with_subtitle("Rounded box (2D)"),
     ]
 }
