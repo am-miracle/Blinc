@@ -1295,7 +1295,17 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             let file_sig = sigs.sink_file_for(node_id);
             let file_resp = ui.file_picker(&file_sig).placeholder("Output file…").show();
             if file_resp.clicked {
-                file_sig.set("/exports/sink_output.json".to_string());
+                // Real cross-platform open: native dialog on desktop
+                // (rfd via the `dialogs` feature), `<input type=file>`
+                // on web. The callback writes the chosen path / name
+                // back into the bound signal; web yields a file name
+                // (browsers hide the real path).
+                let sig = file_sig;
+                blinc_app::file_open::open_file_into(move |picked| {
+                    if let Some(p) = picked {
+                        sig.set(p);
+                    }
+                });
             }
         });
 

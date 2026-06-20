@@ -35,7 +35,10 @@ cn = ["dep:blinc_cn"]
 # `blinc_node_editor` — metadata-driven node-graph editor toolkit
 # (node_editor_demo). Implies `canvas` since the editor renders into
 # a `blinc_canvas_kit::CanvasKit` surface.
-node-editor = ["canvas", "dep:blinc_node_editor", "dep:blinc_portal_ui"]
+# Pulls `blinc_app/dialogs` (rfd) so the demo's file_picker opens a
+# real native dialog on desktop. Web uses the `<input type=file>`
+# path in `blinc_app::file_open`, no extra dep.
+node-editor = ["canvas", "dep:blinc_node_editor", "dep:blinc_portal_ui", "blinc_app/dialogs"]
 
 # Tabler icon set (tabler_icons_demo).
 tabler-icons = ["dep:blinc_tabler_icons"]
