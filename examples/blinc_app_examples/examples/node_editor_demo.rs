@@ -1284,10 +1284,15 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             }
 
             // Multi-line notes — exercises the textarea widget
-            // (Enter = newline, Up/Down between lines).
+            // (Enter = newline, Up/Down between lines). Drag the
+            // bottom-right grip to grow the box vertically.
             ui.label("notes:");
             let notes_sig = sigs.sink_notes_for(node_id);
-            ui.textarea(&notes_sig).rows(2).placeholder("Notes…").show();
+            ui.textarea(&notes_sig)
+                .rows(2)
+                .placeholder("Notes…")
+                .resizable(blinc_portal_ui::ResizeDir::Vertical)
+                .show();
 
             // Output path — file_picker trigger. The host would open
             // a native dialog on click; here we just stamp a demo
