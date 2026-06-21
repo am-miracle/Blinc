@@ -1926,8 +1926,8 @@ fn build_editor(ctx: &mut WindowedContext) -> (Editor, HostGraph, DemoHistory) {
     // the content closure can capture this rebuild's editor handle.
     {
         use blinc_node_editor::config::{
-            BooleanProperty, ConfigSchema, NumberProperty, Predicate, PropertyRule,
-            SelectProperty, TextProperty,
+            BooleanProperty, ConfigSchema, NumberProperty, Predicate, PropertyRule, SelectProperty,
+            TextProperty,
         };
         use blinc_node_editor::prelude::JsonValue;
         use blinc_node_editor::{ContentItem, ContentSchema};
@@ -2003,9 +2003,11 @@ fn build_editor(ctx: &mut WindowedContext) -> (Editor, HostGraph, DemoHistory) {
         let mut slots: blinc_node_editor::content_schema::SlotRegistry = Default::default();
         slots.insert(
             "preview".into(),
-            std::sync::Arc::new(|_id: &blinc_node_editor::NodeId, ui: &mut blinc_portal_ui::PortalUi| {
-                ui.label("● host-rendered slot");
-            }),
+            std::sync::Arc::new(
+                |_id: &blinc_node_editor::NodeId, ui: &mut blinc_portal_ui::PortalUi| {
+                    ui.label("● host-rendered slot");
+                },
+            ),
         );
 
         let content_for_closure = content;
