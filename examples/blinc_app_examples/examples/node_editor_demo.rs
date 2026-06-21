@@ -1563,6 +1563,12 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
             // instance ends up the right size without a manual
             // override.
             .with_badge(StatusBadge::info(3).with_tooltip("3 pending writes")),
+        // Tier 11: schema-driven node. Its body is composed by the
+        // schema->Portal-UI walker from the "config" template's
+        // ConfigSchema (registered in build_editor after the editor
+        // exists). Edit the fields and the values persist on the
+        // node's `config` via patch_node_config.
+        NodeInstance::new("config/1", "config", Point::new(1240.0, 80.0)),
         // Subgraph-reference node. Renders as a diamond with the
         // accent fill/stroke regardless of the template's shape (the
         // editor forces Diamond on any instance with `subgraph_ref`
@@ -1910,6 +1916,120 @@ fn build_editor(ctx: &mut WindowedContext) -> (Editor, HostGraph, DemoHistory) {
                 .with_size(3.0)
                 .with_zoom_adaptive(0.3, 5),
         );
+
+    // Tier 11: register the schema-driven "config" template. The IR
+    // (a ConfigSchema of typed PropertyDefinitions) is walked into a
+    // live Portal-UI form by `walk_schema` inside the content slot;
+    // edits route through `EditorFieldAccess` -> `patch_node_config`,
+    // which runs the rule cascade and emits `NodeConfigChanged`.
+    // Registered here (after the editor exists, before `set_graph`) so
+    // the content closure can capture this rebuild's editor handle.
+    {
+        use blinc_node_editor::config::{
+            BooleanProperty, ConfigSchema, NumberProperty, Predicate, PropertyRule,
+            SelectProperty, TextProperty,
+        };
+        use blinc_node_editor::prelude::JsonValue;
+        use blinc_node_editor::{ContentItem, ContentSchema};
+
+        let schema = ConfigSchema::new()
+            .with_property(
+                SelectProperty::new("mode", "Mode")
+                    .option("strict", "Strict")
+                    .option("lenient", "Lenient")
+                    .default("strict"),
+            )
+            .with_property(
+                NumberProperty::new("threshold", "Threshold")
+                    .default(0.5)
+                    .range(0.0, 1.0)
+                    .step(0.01),
+            )
+            // Strict-only field, shown via a `When` rule below.
+            .with_property(
+                NumberProperty::new("strictWindow", "Strict window")
+                    .default(8.0)
+                    .range(1.0, 64.0)
+                    .step(1.0)
+                    .integer(),
+            )
+            .with_property(BooleanProperty::new("verbose", "Verbose").default(false))
+            .with_property(TextProperty::new("note", "Note").placeholder("label…"))
+            // Phase 3: value cascade. Flipping Mode to "lenient" pins
+            // Threshold to 0.2 (the slider reflects it next frame).
+            // Driven entirely by the editor's `cascade_rules` on
+            // `patch_node_config`; the walker needs no knowledge of it.
+            .with_rule(
+                PropertyRule::new()
+                    .trigger("mode")
+                    .when(Predicate::Eq {
+                        key: "mode".into(),
+                        value: JsonValue::from("lenient"),
+                    })
+                    .set("threshold", JsonValue::from(0.2)),
+            );
+
+        // Phase 4: structure the form with a ContentSchema. The
+        // strict-window field appears only while Mode == "strict"
+        // (declarative show/hide via `When`, evaluated each frame —
+        // never a config mutation).
+        let content = ContentSchema::new(schema.clone())
+            .with(ContentItem::Section {
+                title: "Validation".into(),
+                children: vec![
+                    ContentItem::Field("mode".into()),
+                    ContentItem::Field("threshold".into()),
+                    ContentItem::When {
+                        when: Predicate::Eq {
+                            key: "mode".into(),
+                            value: JsonValue::from("strict"),
+                        },
+                        children: vec![ContentItem::Field("strictWindow".into())],
+                    },
+                ],
+            })
+            .with(ContentItem::Separator)
+            .field("verbose")
+            .field("note")
+            // Phase 5: a host-rendered CustomSlot composed INTO the
+            // schema tree, and a Repeater (dynamic string list).
+            .with(ContentItem::Separator)
+            .with(ContentItem::Label("Tags".into()))
+            .with(ContentItem::Repeater { key: "tags".into() })
+            .with(ContentItem::CustomSlot("preview".into()));
+
+        // Phase 5: SlotRegistry — host Portal-UI composed by the walker
+        // wherever a CustomSlot references it by name.
+        let mut slots: blinc_node_editor::content_schema::SlotRegistry = Default::default();
+        slots.insert(
+            "preview".into(),
+            std::sync::Arc::new(|_id: &blinc_node_editor::NodeId, ui: &mut blinc_portal_ui::PortalUi| {
+                ui.label("● host-rendered slot");
+            }),
+        );
+
+        let content_for_closure = content;
+        let slots_for_closure = std::sync::Arc::new(slots);
+        let editor_for_content = editor.clone();
+        editor.add_template(
+            NodeTemplate::new("config", "Config")
+                .with_config_schema(schema)
+                .with_content_size(240.0, 360.0, move |id, ui| {
+                    let mut access = blinc_node_editor::EditorFieldAccess::new(
+                        editor_for_content.clone(),
+                        id.clone(),
+                    );
+                    blinc_node_editor::walk_content(
+                        ui,
+                        &content_for_closure,
+                        &mut access,
+                        id,
+                        &slots_for_closure,
+                        &blinc_node_editor::WalkOptions::default(),
+                    );
+                }),
+        );
+    }
 
     // Initial sync from the persisted host. On first build the host
     // carries `initial_nodes / initial_connections / initial_groups`
