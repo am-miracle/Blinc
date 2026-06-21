@@ -7881,6 +7881,18 @@ impl RenderContext {
                 // focused cn::input) dispatch HERE so they land above
                 // the dyn-batch SDF the popover just painted.
                 self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
+                // Canvas-emitted dynamic images (portal_ui noise /
+                // texture nodes via draw_rgba_pixels). Dispatched in the
+                // canvas/overlay band — BEFORE the foreground overlay —
+                // so a node's RGBA content sits with the rest of the
+                // canvas content and UNDER foreground chrome (search
+                // bar, host `RenderLayer::Foreground` overlays). Each
+                // image is scissored to its node body by the clip
+                // captured at emit time (see `render_dynamic_images`).
+                if !overlay.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target_view, &overlay.dynamic_images);
+                }
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
@@ -7925,10 +7937,6 @@ impl RenderContext {
                         let dpi = tree.scale_factor();
                         self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
                     }
-                }
-                if !overlay.dynamic_images.is_empty() {
-                    self.renderer
-                        .render_dynamic_images(target_view, &overlay.dynamic_images);
                 }
                 if !overlay.meshes.is_empty() {
                     dispatch_pending_meshes(
@@ -8254,6 +8262,14 @@ impl RenderContext {
                 );
                 self.dispatch_dynamic_batch_overlay(target_view);
                 self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
+                // Canvas-emitted dynamic images (noise / texture nodes)
+                // dispatched in the canvas band — before the foreground
+                // overlay — and scissored to their node body. See the
+                // longer note at the first fast-path site.
+                if !overlay.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target_view, &overlay.dynamic_images);
+                }
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
@@ -8285,10 +8301,6 @@ impl RenderContext {
                         let dpi = tree.scale_factor();
                         self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
                     }
-                }
-                if !overlay.dynamic_images.is_empty() {
-                    self.renderer
-                        .render_dynamic_images(target_view, &overlay.dynamic_images);
                 }
                 if !overlay.meshes.is_empty() {
                     dispatch_pending_meshes(
@@ -8536,6 +8548,14 @@ impl RenderContext {
         );
         self.dispatch_dynamic_batch_overlay(target_view);
         self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
+        // Canvas-emitted dynamic images (noise / texture nodes)
+        // dispatched in the canvas band — before the foreground overlay
+        // — and scissored to their node body. See the longer note at
+        // the first fast-path site.
+        if !overlay.dynamic_images.is_empty() {
+            self.renderer
+                .render_dynamic_images(target_view, &overlay.dynamic_images);
+        }
         // Foreground overlay — re-dispatch fg primitives on top of
         // the canvas overlay so host overlays marked
         // `RenderLayer::Foreground` win z-order over canvas content.
@@ -8567,10 +8587,6 @@ impl RenderContext {
         self.composite_css_layers_overlay(tree, target_view);
         // P4.3 sibling: motion-subtree textures.
         self.composite_motion_layers_overlay(tree, target_view);
-        if !overlay.dynamic_images.is_empty() {
-            self.renderer
-                .render_dynamic_images(target_view, &overlay.dynamic_images);
-        }
         if !overlay.meshes.is_empty() {
             dispatch_pending_meshes(
                 &mut self.renderer,

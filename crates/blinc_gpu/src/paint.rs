@@ -3646,6 +3646,13 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
     fn draw_rgba_pixels(&mut self, data: &[u8], width: u32, height: u32, dest: Rect) {
         let transformed = self.transform_rect(dest);
         let opacity = self.current_opacity();
+        // Capture the active clip (the portal/node-body clip pushed
+        // around a canvas closure) so the image shader clips the upload
+        // to it in-shader — the same per-primitive clip SDF uses.
+        // Without this a canvas-emitted RGBA upload paints full-coverage
+        // on top of everything; the no-clip sentinel keeps root callers
+        // (full-window video, camera preview) full-coverage.
+        let (clip_bounds, clip_radius, _cs, _t) = self.get_clip_data();
         self.batch
             .dynamic_images
             .push(crate::primitives::DynamicImage {
@@ -3655,6 +3662,8 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 dest: transformed,
                 opacity,
                 corner_radius: 0.0,
+                clip_bounds,
+                clip_radius,
             });
     }
 

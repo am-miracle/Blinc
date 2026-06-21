@@ -1572,6 +1572,17 @@ pub struct DynamicImage {
     pub opacity: f32,
     /// Corner radius
     pub corner_radius: f32,
+    /// Active clip rect at emit time, in transformed/physical space,
+    /// as `[min_x, min_y, max_x, max_y]` (the form `get_clip_data`
+    /// returns). Fed to the image shader's per-instance clip at render
+    /// (the same in-shader clip SDF primitives use) so a canvas-emitted
+    /// image stays inside its node body / scroll container. The
+    /// no-clip sentinel (`[-10000, -10000, 100000, 100000]`) means
+    /// full-coverage.
+    pub clip_bounds: [f32; 4],
+    /// Per-corner clip radius `[tl, tr, br, bl]` from `get_clip_data`,
+    /// so a rounded node-body clip rounds the image too.
+    pub clip_radius: [f32; 4],
 }
 
 impl PrimitiveBatch {

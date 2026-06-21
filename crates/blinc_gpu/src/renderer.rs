@@ -9504,8 +9504,19 @@ impl GpuRenderer {
                 Some("dynamic_image"),
             );
 
-            // Create an instance for the image pipeline
-            let instance = GpuImageInstance::new(
+            // Create an instance for the image pipeline. Apply the
+            // emit-time clip (node body / scroll container) as the
+            // image shader's PER-INSTANCE clip — the same in-shader
+            // clip SDF primitives respect — so the upload stays inside
+            // its element on every render path (overlay, motion
+            // subtree, static), with no dependence on scissor / pass
+            // order. `clip_bounds` is already [x, y, width, height]
+            // (the format `get_clip_data` / `GpuImageInstance` use); it
+            // is NOT [minx, miny, maxx, maxy]. The no-clip sentinel
+            // (x == -10000, w == 100000) is left as the instance
+            // default so genuinely-unclipped callers (root video,
+            // camera preview) keep full coverage.
+            let mut instance = GpuImageInstance::new(
                 img.dest.x(),
                 img.dest.y(),
                 img.dest.width(),
@@ -9513,6 +9524,23 @@ impl GpuRenderer {
             )
             .with_opacity(img.opacity)
             .with_border_radius(img.corner_radius);
+
+            let [cx, cy, cw, ch] = img.clip_bounds;
+            let no_clip = cx <= -9999.0; // sentinel = unclipped (root video, camera preview)
+            if !no_clip && (cw <= 0.0 || ch <= 0.0) {
+                // Empty clip: the element is fully outside its clip
+                // region this frame (e.g. a canvas node panned past the
+                // canvas-area edge — `get_clip_data` intersects the
+                // node body with the canvas overflow_clip to nothing).
+                // Render NOTHING rather than falling through to a full-
+                // coverage draw that escapes the canvas (the bug: an
+                // image past the edge painted over the header/minimap).
+                continue;
+            }
+            if !no_clip {
+                instance.clip_bounds = [cx, cy, cw, ch];
+                instance.clip_radius = img.clip_radius;
+            }
 
             // Render using the existing image pipeline
             self.render_images(target, gpu_image.view(), &[instance]);
