@@ -5,7 +5,10 @@
 
 # IDE
 .idea/
-.vscode/
+.vscode/*
+# Keep the shared, low-resource-tuned rust-analyzer settings tracked;
+# ignore everyone's personal .vscode/* otherwise.
+!.vscode/settings.json
 *.swp
 *.swo
 *~

@@ -1,0 +1,42 @@
+{
+  // rust-analyzer tuned for the Blinc workspace on constrained machines.
+  // Indexing the full workspace can otherwise push rust-analyzer past
+  // ~1.8 GB RSS and OOM an 8 GB box (see the README section
+  // "Building on low-resource machines"). These settings keep completions
+  // and go-to-definition working while cutting peak memory and CPU.
+
+  // Index on demand instead of eagerly priming the whole workspace at
+  // startup — the single biggest startup RAM/CPU saver on a big workspace.
+  "rust-analyzer.cachePriming.enable": false,
+
+  // Restrict the on-save `cargo check` to the crate you're editing rather
+  // than re-checking every workspace member. Diagnostics still appear for
+  // the current crate; the workspace-wide pass (the heavy one) is dropped.
+  "rust-analyzer.check.workspace": false,
+
+  // Analyze only the default target, not every test / bench / example at
+  // once. Remove this line to restore full-target analysis on a machine
+  // with RAM to spare.
+  "rust-analyzer.cargo.allTargets": false,
+
+  // Give rust-analyzer its own target dir so its background `cargo check`
+  // doesn't invalidate (and get invalidated by) your CLI `cargo build` —
+  // avoids full recompiles every time you switch between the two.
+  "rust-analyzer.cargo.targetDir": true,
+
+  // Don't index the throwaway generated web-example crates.
+  "rust-analyzer.files.excludeDirs": ["examples/_generated"],
+
+  // On a very low-RAM box you can also cap parallelism (uncomment):
+  // "rust-analyzer.numThreads": 4,
+
+  // Keep the file watcher and search off the large artifact directories.
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/examples/_generated/**": true
+  },
+  "search.exclude": {
+    "**/target": true,
+    "**/examples/_generated": true
+  }
+}
