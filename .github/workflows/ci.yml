@@ -15,6 +15,18 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
+  guard:
+    name: Guard (no local patch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validate the COMMITTED manifest directly (no strip first): it must
+      # not carry the local-dev [patch] block that redirects sibling crates
+      # to gitignored packages/*, which breaks cargo on every fresh clone.
+      - name: Ensure Cargo.toml has no local-dev [patch] block
+        shell: bash
+        run: bash scripts/check-no-local-patch.sh
+
   check:
     name: Check
     runs-on: ubuntu-latest

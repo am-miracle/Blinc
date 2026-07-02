@@ -40,6 +40,55 @@ fn main() -> Result<()> {
 
 The same `build_ui` function runs on desktop and web and no separate codebase.
 
+## Running the examples
+
+A fresh clone builds every example with no extra setup — the sibling crates
+(`blinc_canvas_kit`, `blinc_portal_ui`, `blinc_node_editor`, `blinc_game_kit`)
+resolve from their published git pins:
+
+```bash
+cargo run -p blinc_app_examples --example cn_demo --features cn
+```
+
+### Developing the sibling crates
+
+Those four crates live in their own repositories. To edit them from local
+checkouts, opt in with:
+
+```bash
+./scripts/use-local-packages.sh   # clones them into packages/ (gitignored)
+                                  # and redirects the workspace to those copies
+```
+
+This modifies `Cargo.toml` **locally only** — do not commit it (CI's
+`check-no-local-patch.sh` guard rejects it). Revert before committing:
+
+```bash
+./scripts/use-published-packages.sh
+```
+
+### Building on low-resource machines
+
+The debug profile is tuned so a workspace build fits comfortably on ~8 GB
+RAM / a small SSD: dependencies are compiled without debuginfo and
+workspace crates use line-table backtraces only (`file:line` still
+resolves). That is the single biggest lever for both `target/` size and
+peak linker memory — no configuration needed.
+
+If a full-workspace build still thrashes or OOMs on a constrained box
+(e.g. an 8 GB ASUS NUC), reach for these, in order of impact:
+
+- **Build only what you need**, not the whole workspace:
+  `cargo run -p blinc_app_examples --example cn_demo --features cn`.
+- **Cap parallelism** so N `rustc` processes don't collectively exhaust
+  RAM: `CARGO_BUILD_JOBS=4 cargo build` (or uncomment `jobs` in
+  `.cargo/config.toml`). Start near half your core count.
+- **Use a faster, lower-memory linker** (mold on Linux, lld on macOS) —
+  see the commented target blocks in `.cargo/config.toml`. Linking is the
+  heaviest single step on low-RAM machines.
+- **Reclaim SSD** with `CARGO_INCREMENTAL=0` (smaller `target/`, slower
+  warm rebuilds), and `cargo clean` between large feature switches.
+
 ## Platform Support
 
 | Platform | Status | Backend |

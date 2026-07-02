@@ -185,6 +185,20 @@ criterion = "0.5"
 
 [profile.dev]
 opt-level = 1
+# Constrained-machine friendly (e.g. 8 GB RAM / small SSD). Full DWARF is
+# a large share of target/ and a major driver of peak LINKER memory — the
+# thing that OOMs low-RAM builds. Keep line-table backtraces (file:line
+# still resolves) for workspace crates and drop debuginfo from
+# dependencies entirely (you rarely step into them). This shrinks target/
+# substantially and lowers link-time RAM with no effect on your own
+# backtraces. See the "Building on low-resource machines" README section
+# for the per-machine knobs (parallel jobs, faster linker).
+debug = "line-tables-only"
+
+# Dependencies: no debuginfo at all. Compiled once and cached; the bulk of
+# the debug-build disk + link-RAM savings comes from here.
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 lto = "thin"
@@ -236,47 +250,3 @@ blinc_theme = { path = "crates/blinc_theme" }
 # for SvgDocument / Path conversion; without this they'd resolve to
 # the pinned git rev.
 blinc_svg = { path = "crates/blinc_svg" }
-
-# Local-dev redirects for the /packages/* sibling crates.
-#
-# Everything below this marker is stripped by `scripts/ci-strip-
-# local-patch.sh` before cargo runs in CI — the `/packages/`
-# directory is gitignored and isn't present on a fresh CI clone,
-# so the path-target lookups fail at resolve time even though the
-# patched deps are optional + feature-gated. On local dev the
-# packages dir IS present, the redirects fire, and every consumer
-# (workspace example, sibling /packages/ crates) resolves to the
-# SAME local source for canvas_kit / portal_ui / node_editor.
-#
-# DO NOT add patches above this marker — the strip script removes
-# from this comment line onwards.
-
-# Patch the sibling downstream `blinc_canvas_kit` git URL to the
-# local `packages/blinc_canvas_kit` copy. Without this entry, the
-# example crate's git dep on canvas_kit (at a pinned rev) and the
-# path-dep that `/packages/blinc_node_editor` uses end up as two
-# different in-graph copies — `editor.element()` returns one
-# version's `Div` while the example imports the other's, and the
-# types refuse to unify.
-[patch."https://github.com/project-blinc/blinc_canvas_kit.git"]
-blinc_canvas_kit = { path = "packages/blinc_canvas_kit" }
-
-# Sibling downstream `blinc_portal_ui` lives in its own repo too — same
-# rationale as the canvas_kit patch above: keep the path-dep'd
-# `/packages/blinc_node_editor` and the git-pinned downstream
-# resolved against the same in-graph copy.
-[patch."https://github.com/project-blinc/blinc_portal_ui.git"]
-blinc_portal_ui = { path = "packages/blinc_portal_ui" }
-
-# `blinc_node_editor` lives in its own repo as well. Same rationale
-# as canvas_kit / portal_ui: redirect the git URL to the local
-# checkout for source-local iteration, silently skip the patch on
-# fresh clones (CI) where `/packages/` isn't present.
-[patch."https://github.com/project-blinc/blinc_node_editor.git"]
-blinc_node_editor = { path = "packages/blinc_node_editor" }
-
-# `blinc_game_kit` — the merged glTF loader + skeleton poser (replaces
-# the former separate `blinc_gltf` + `blinc_skeleton` repos). Same
-# local-dev redirect pattern; stripped on CI.
-[patch."https://github.com/project-blinc/blinc_game_kit.git"]
-blinc_game_kit = { path = "packages/blinc_game_kit" }

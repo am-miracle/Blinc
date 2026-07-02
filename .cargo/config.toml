@@ -46,6 +46,32 @@ rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
 [build]
 # Uncomment to set a default target:
 # target = "aarch64-linux-android"
+#
+# ── Low-resource machines (e.g. 8 GB RAM / small SSD) ─────────────────
+# These are left COMMENTED so they don't cap well-provisioned machines.
+# Uncomment locally (or use the env override noted on each line).
+#
+# Cap parallel codegen so N rustc processes don't collectively exhaust
+# RAM. Start around half your core count; lower it if builds still
+# thrash/OOM. Env override: CARGO_BUILD_JOBS=4
+# jobs = 4
+#
+# Drop incremental artifacts to reclaim SSD space (they can add GBs to
+# target/). Slower warm rebuilds, much smaller footprint.
+# Env override: CARGO_INCREMENTAL=0
+# incremental = false
+
+# A faster, lower-memory linker cuts link time and peak RAM substantially
+# (linking is the heaviest single step on constrained machines). Install
+# one, then uncomment the block for your platform:
+#   Linux:  sudo apt install mold     macOS: lld ships with `brew install llvm`
+#
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+#
+# [target.aarch64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [env]
 # These can be overridden by environment variables
