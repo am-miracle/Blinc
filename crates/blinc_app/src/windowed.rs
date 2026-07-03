@@ -5311,6 +5311,16 @@ impl WindowedApp {
                             let mut did_rebuild = false;
                             let mut dirty_spring_count = 0usize;
 
+                            // Bind the surface handle up front: the
+                            // (feature-gated) frame-gate stall recovery below may
+                            // reconfigure it, and the frame acquire further down
+                            // uses it. Binding here keeps `surf` in scope for both
+                            // regardless of which Wayland features are enabled.
+                            let surf = match ws.surface.as_ref() {
+                                Some(s) => s,
+                                None => return ControlFlow::Continue,
+                            };
+
                             // Experimental Wayland frame-callback gate: when
                             // active, drain our wl_callback Done events from
                             // the connection's per-queue inbox and bail out
@@ -5401,11 +5411,7 @@ impl WindowedApp {
                                 }
                             }
 
-                            // Get current frame
-                            let surf = match ws.surface.as_ref() {
-                                Some(s) => s,
-                                None => return ControlFlow::Continue,
-                            };
+                            // Get current frame (surf bound above)
                             let frame = match surf.get_current_texture() {
                                 Ok(f) => f,
                                 Err(wgpu::SurfaceError::Lost) => {
