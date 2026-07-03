@@ -1,6 +1,6 @@
 //! Cross-platform "open a file" with a callback.
 //!
-//! [`crate::dialog`] is the rich rfd-backed API, but it's
+//! `crate::dialog` is the rich rfd-backed API, but it's
 //! **desktop-only** (the `dialogs`/`rfd` feature) and synchronous —
 //! `pick()` blocks until the user chooses. The web has neither: there
 //! is no synchronous native dialog, and picking happens later via an

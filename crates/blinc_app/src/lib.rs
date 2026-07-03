@@ -167,7 +167,7 @@ pub mod dialog;
 
 /// Cross-platform callback-based file open (`open_file_into`) — works
 /// on desktop (rfd) AND web (`<input type=file>`), unlike the
-/// synchronous desktop-only [`dialog`].
+/// synchronous desktop-only `dialog` API (the `dialogs`/`rfd` feature).
 pub mod file_open;
 
 /// Window state persistence (save/restore position, size, maximized).
