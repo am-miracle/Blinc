@@ -402,7 +402,7 @@ fn open_color_picker_popover(
         d.value = hex_signal.get();
         d.cursor = d.value.len();
     }
-    let hex_signal_on_change = hex_signal.clone();
+    let hex_signal_on_change = hex_signal;
     let hex_data_on_change = hex_data.clone();
 
     // Wheel → input sync. A reactive `effect` listens on the hex
@@ -414,7 +414,7 @@ fn open_color_picker_popover(
     // disposed in `on_close` so dropping the popover stops the
     // subscription (otherwise hex updates after close would keep
     // poking a SharedTextInputData no longer mounted in the tree).
-    let hex_for_effect = hex_signal.clone();
+    let hex_for_effect = hex_signal;
     let data_for_effect = hex_data.clone();
     let sync_effect = blinc_core::reactive::effect(move |_g| {
         let new_hex = hex_for_effect.get();
@@ -443,7 +443,7 @@ fn open_color_picker_popover(
             let bg = blinc_theme::ThemeState::get().color(ColorToken::SurfaceElevated);
             let border = blinc_theme::ThemeState::get().color(ColorToken::Border);
             let hex_for_input = hex_data_on_change.clone();
-            let hex_signal_for_change = hex_signal_on_change.clone();
+            let hex_signal_for_change = hex_signal_on_change;
             div()
                 .id(&popover_id_for_content)
                 .flex_col()
@@ -456,7 +456,7 @@ fn open_color_picker_popover(
                 .lock_corner_shape()
                 .p_px(8.0)
                 .shadow_lg()
-                .child(blinc_portal_ui::color_wheel_panel(hex_signal.clone()))
+                .child(blinc_portal_ui::color_wheel_panel(hex_signal))
                 .child(
                     blinc_cn::input(&hex_for_input)
                         .placeholder("#rrggbb")
@@ -560,7 +560,7 @@ fn open_script_editor_popover(
     let lang_label = language.unwrap_or("plain").to_string();
     let lang_for_closure = language.unwrap_or("plain");
 
-    let script_signal_for_on_change = script_signal.clone();
+    let script_signal_for_on_change = script_signal;
 
     let handle = OverlayBuilder::popover()
         .at(anchor.x(), anchor.y() + anchor.height() + 4.0)
@@ -574,7 +574,7 @@ fn open_script_editor_popover(
             let border = blinc_theme::ThemeState::get().color(ColorToken::Border);
             let text_muted = blinc_theme::ThemeState::get().color(ColorToken::TextSecondary);
             let state_for_editor = state.clone();
-            let sig_on_change = script_signal_for_on_change.clone();
+            let sig_on_change = script_signal_for_on_change;
             let lang_for_header = lang_label.clone();
             div()
                 .id(&popover_id_for_content)
