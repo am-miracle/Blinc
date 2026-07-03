@@ -426,6 +426,12 @@ pub(crate) struct WindowState {
     /// `crate::wayland_frame_gate` module docs.
     #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
     pub wayland_gate: Option<crate::wayland_frame_gate::WaylandFrameGate>,
+    #[cfg(target_os = "linux")]
+    /// Wayland only: keep the swapchain cycling when the scene is static
+    /// (self-driven, vsync-paced presents) so the compositor never starves
+    /// the next `get_current_texture()`. Set at surface creation from the
+    /// detected display backend; override with `BLINC_KEEP_ALIVE=1/0`.
+    pub wayland_keep_alive: bool,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -459,6 +465,8 @@ impl WindowState {
             last_pointer_dispatch: None,
             #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
             wayland_gate: None,
+            #[cfg(target_os = "linux")]
+            wayland_keep_alive: false,
         }
     }
 }
@@ -511,7 +519,21 @@ fn preferred_present_mode(
     {
         let caps = surface.get_capabilities(adapter);
         let modes = caps.present_modes;
-        let pick = if modes.contains(&wgpu::PresentMode::Immediate) {
+        // Debug override: BLINC_PRESENT_MODE=fifo|fifo_relaxed|mailbox|immediate
+        // forces a specific mode when the surface offers it; otherwise the
+        // normal auto ladder applies.
+        let forced = std::env::var("BLINC_PRESENT_MODE").ok().and_then(|w| {
+            match w.trim().to_ascii_lowercase().as_str() {
+                "fifo" | "autovsync" => Some(wgpu::PresentMode::Fifo),
+                "fifo_relaxed" | "fiforelaxed" => Some(wgpu::PresentMode::FifoRelaxed),
+                "mailbox" => Some(wgpu::PresentMode::Mailbox),
+                "immediate" => Some(wgpu::PresentMode::Immediate),
+                _ => None,
+            }
+        });
+        let pick = if let Some(m) = forced.filter(|m| modes.contains(m)) {
+            m
+        } else if modes.contains(&wgpu::PresentMode::Immediate) {
             wgpu::PresentMode::Immediate
         } else if modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
@@ -523,6 +545,7 @@ fn preferred_present_mode(
         tracing::info!(
             available = ?modes,
             chosen = ?pick,
+            forced = ?forced,
             "Linux surface present-mode selection",
         );
         pick
@@ -3381,7 +3404,59 @@ impl WindowedApp {
                                         }
                                     }
 
-                                    ws.surface = Some(surf);
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        // On Wayland, once the scene goes static the
+                                        // event loop parks (epoll) and stops
+                                        // presenting; the compositor then stops
+                                        // releasing swapchain buffers and the next
+                                        // get_current_texture() starves for ~1s
+                                        // ("paints once then dead"). Detect a genuine
+                                        // Wayland backend (not X11/XWayland) and keep
+                                        // the swapchain cycling: the frame loop
+                                        // self-drives request_redraw(), which winit
+                                        // paces to vsync through pre_present_notify —
+                                        // steady ~7% CPU, not a busy spin. Override
+                                        // with BLINC_KEEP_ALIVE=1/0.
+                                        let on_wayland = {
+                                            use raw_window_handle::{
+                                                HasDisplayHandle, RawDisplayHandle,
+                                            };
+                                            window
+                                                .winit_window()
+                                                .display_handle()
+                                                .map(|dh| {
+                                                    matches!(
+                                                        dh.as_raw(),
+                                                        RawDisplayHandle::Wayland(_)
+                                                    )
+                                                })
+                                                .unwrap_or(false)
+                                        };
+                                        ws.wayland_keep_alive =
+                                            match std::env::var("BLINC_KEEP_ALIVE")
+                                                .ok()
+                                                .as_deref()
+                                            {
+                                                Some("0") | Some("false")
+                                                | Some("off") => false,
+                                                Some("1") | Some("true")
+                                                | Some("on") => true,
+                                                _ => on_wayland,
+                                            };
+                                        if ws.wayland_keep_alive {
+                                            tracing::info!(
+                                                "wayland keep-alive active: \
+                                                 self-driven vsync-paced presents \
+                                                 keep the swapchain from starving"
+                                            );
+                                        }
+                                        ws.surface = Some(surf);
+                                    }
+                                    #[cfg(not(target_os = "linux"))]
+                                    {
+                                        ws.surface = Some(surf);
+                                    }
                                     ws.surface_config = Some(config);
                                     ws.app = Some(blinc_app);
 
@@ -5188,17 +5263,38 @@ impl WindowedApp {
                         let dirty = frame_dirty.swap(false, Ordering::AcqRel);
                         let stateful_dirty = blinc_layout::peek_needs_redraw()
                             || blinc_layout::has_pending_subtree_rebuilds();
-                        if !dirty && !stateful_dirty {
+                        // Wayland keep-alive: when the frame-gate is active we must
+                        // keep presenting even when the scene is static. Once
+                        // animations finish and the redraw chain goes quiet,
+                        // skipping here stops all presents; Mutter then holds every
+                        // swapchain buffer and the next get_current_texture()
+                        // starves for the full ~1s acquire timeout (freeze). The
+                        // gate throttles us to the compositor's Done cadence, so
+                        // this stays vsync-paced, not a spin.
+                        // Wayland keep-alive: keep presenting even when the
+                        // scene is static (frame-gate or present-thread mode),
+                        // else the swapchain goes idle and the compositor starves
+                        // the next acquire.
+                        #[allow(unused_mut)]
+                        let mut keep_alive = false;
+                        #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+                        {
+                            keep_alive |= ws.wayland_gate.is_some();
+                        }
+                        #[cfg(target_os = "linux")]
+                        {
+                            keep_alive |= ws.wayland_keep_alive;
+                        }
+                        if !dirty && !stateful_dirty && !keep_alive {
                             return ControlFlow::Continue;
                         }
 
                         if let (
                             Some(blinc_app),
-                            Some(surf),
                             Some(config),
                             Some(windowed_ctx),
                             Some(rs),
-                        ) = (&mut ws.app, &ws.surface, &ws.surface_config, &mut ws.ctx, &mut ws.render_state)
+                        ) = (&mut ws.app, &ws.surface_config, &mut ws.ctx, &mut ws.render_state)
                         {
                             // Per-phase frame timing. Cheap when the trace target
                             // is disabled (Instant::now is ~10 ns on macOS); gated
@@ -5279,12 +5375,37 @@ impl WindowedApp {
                                 }
 
                                 if !proceed {
+                                    // Not ready and the safety valve hasn't
+                                    // elapsed: re-check next frame without
+                                    // busy-spinning. request_redraw() re-dispatches
+                                    // RedrawRequested immediately, so pace with a
+                                    // sub-ms sleep (Done cadence is ~16ms; catching
+                                    // it within ~0.5ms adds no perceptible latency).
+                                    std::thread::sleep(std::time::Duration::from_micros(500));
                                     window.request_redraw();
                                     return ControlFlow::Continue;
+                                }
+                                // Proceeding WITHOUT Done means the safety valve
+                                // fired — the compositor stalled its frame
+                                // callbacks and the swapchain has starved (Mutter
+                                // holds every buffer until the surface is
+                                // reconfigured). Recreate it, exactly as a manual
+                                // window resize does, so the acquire below doesn't
+                                // block the full ~1s timeout.
+                                if !ready {
+                                    tracing::debug!(
+                                        target: "blinc_app::wayland_gate",
+                                        "Done stalled; recreating swapchain to un-starve acquire",
+                                    );
+                                    surf.configure(blinc_app.device(), config);
                                 }
                             }
 
                             // Get current frame
+                            let surf = match ws.surface.as_ref() {
+                                Some(s) => s,
+                                None => return ControlFlow::Continue,
+                            };
                             let frame = match surf.get_current_texture() {
                                 Ok(f) => f,
                                 Err(wgpu::SurfaceError::Lost) => {
@@ -5296,19 +5417,18 @@ impl WindowedApp {
                                     return ControlFlow::Exit;
                                 }
                                 Err(wgpu::SurfaceError::Timeout) => {
-                                    // Transient — Wayland Fifo backpressure,
-                                    // driver quirk on some Linux/Mesa
-                                    // adapters (gfx-rs/wgpu#1218,
-                                    // bevy#5957). Skip this frame and
-                                    // re-arm a redraw; do NOT reconfigure
-                                    // the surface — reconfigure forces
-                                    // another full acquire cycle that
-                                    // tends to time out again, producing
-                                    // multi-second input latency. Matches
-                                    // GPUI / iced / egui / Slint / Bevy
-                                    // policy convergent across the
-                                    // ecosystem.
-                                    tracing::debug!("Surface acquire timeout — skipping frame");
+                                    // The compositor stopped releasing swapchain
+                                    // buffers, so the acquire starved. Reconfigure
+                                    // to un-stick it — the same recovery a manual
+                                    // window resize produces. Without this the UI
+                                    // thread re-enters the acquire and parks on the
+                                    // GPU fence again ("responsive for a while,
+                                    // then froze"). The keep-alive self-drive keeps
+                                    // presents flowing afterward so it stays live.
+                                    tracing::debug!(
+                                        "Surface acquire timeout — reconfiguring to un-stick"
+                                    );
+                                    surf.configure(blinc_app.device(), config);
                                     window.request_redraw();
                                     return ControlFlow::Continue;
                                 }
@@ -5318,9 +5438,8 @@ impl WindowedApp {
                                 }
                             };
 
-                            let view = frame
-                                .texture
-                                .create_view(&wgpu::TextureViewDescriptor::default());
+                            let render_tex: &wgpu::Texture = &frame.texture;
+                            let view = render_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
                             // Update context from window
                             windowed_ctx.update_from_window(window);
@@ -6479,7 +6598,7 @@ impl WindowedApp {
 
                             if let Some(ref tree) = ws.render_tree {
                                 // Set blend target for mix-blend-mode support
-                                blinc_app.set_blend_target(&frame.texture);
+                                blinc_app.set_blend_target(render_tex);
 
                                 // Pass cursor position for @flow pointer input
                                 let (mx, my) = windowed_ctx.event_router.mouse_position();
@@ -6642,7 +6761,7 @@ impl WindowedApp {
                                     tree,
                                     rs,
                                     &view,
-                                    Some(&frame.texture),
+                                    Some(render_tex),
                                     windowed_ctx.physical_width as u32,
                                     windowed_ctx.physical_height as u32,
                                     try_fast_paint,
@@ -6704,6 +6823,24 @@ impl WindowedApp {
                                 gate.arm_before_present();
                             }
                             frame.present();
+                            // Wayland keep-alive self-drive: request the next frame
+                            // so the swapchain keeps cycling while the scene is
+                            // static. `pre_present_notify` (called above) armed the
+                            // compositor's frame callback, so winit paces this to
+                            // vsync (Done) — steady ~7% CPU, not a busy spin.
+                            // `keep_alive` is false off Wayland, so this is a no-op
+                            // on X11 / macOS / Windows.
+                            if keep_alive {
+                                window.request_redraw();
+                            }
+                            // Frame-gate self-drive: keep presents flowing at the
+                            // compositor's Done cadence so the swapchain never goes
+                            // idle (see the keep-alive note above). The gate's Done
+                            // wait throttles this to vsync, so it is not a spin.
+                            #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+                            if _gate_active {
+                                window.request_redraw();
+                            }
                             t_phase4 = phase4_start.elapsed();
 
                             // =========================================================
