@@ -326,6 +326,17 @@ impl AccordionBuilder {
                         .class("cn-accordion-trigger")
                         .flex_row()
                         .w_full()
+                        // Builder padding fallback MUST match the
+                        // `.cn-accordion-trigger` CSS (space-4 / space-3 =
+                        // 16px / 12px). Every other cn menu primitive sets
+                        // this fallback (see cn_styles.rs's note); the
+                        // accordion trigger omitted it, so on a rebuild that
+                        // doesn't re-apply the class layout — and on the
+                        // initial default-open render — the row collapsed to
+                        // zero padding + height. The value equals the CSS so
+                        // there is never a shift when the class does apply.
+                        .py(4.0)
+                        .px(3.0)
                         .justify_between()
                         .items_center()
                         .cursor(CursorStyle::Pointer)
