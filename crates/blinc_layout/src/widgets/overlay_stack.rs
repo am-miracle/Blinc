@@ -1020,8 +1020,7 @@ fn position_wrapper(
                     // teleport, and a menu truly at the bottom edge still
                     // flips so its top rows stay visible.
                     const MIN_BELOW: f32 = 96.0;
-                    let open_upward =
-                        viewport.1 - *y < MIN_BELOW && *y - margin > MIN_BELOW;
+                    let open_upward = viewport.1 - *y < MIN_BELOW && *y - margin > MIN_BELOW;
                     if open_upward {
                         outer
                             .left(cx)
