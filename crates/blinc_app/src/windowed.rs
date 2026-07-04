@@ -432,6 +432,11 @@ pub(crate) struct WindowState {
     /// the next `get_current_texture()`. Set at surface creation from the
     /// detected display backend; override with `BLINC_KEEP_ALIVE=1/0`.
     pub wayland_keep_alive: bool,
+    /// Whether any CSS animation/transition was active last frame.
+    /// Falling edge triggers a one-shot render-cache invalidation so
+    /// composite-promoted subtrees demote and re-emit at their exact
+    /// final state (the fast path never demotes on its own).
+    pub prev_css_active: bool,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -467,6 +472,7 @@ impl WindowState {
             wayland_gate: None,
             #[cfg(target_os = "linux")]
             wayland_keep_alive: false,
+            prev_css_active: false,
         }
     }
 }
@@ -7052,6 +7058,76 @@ impl WindowedApp {
                             // frame; that way the chain stops cleanly the
                             // moment the source goes quiet.
                             let external_anim_tick = blinc_layout::take_animation_tick_request();
+
+                            // cn dropdown/menu/select/popover fade in via CSS
+                            // @keyframes, not the motion FSM, so
+                            // `needs_overlay_redraw` (has_animating_overlays) never
+                            // covers them; and the composite-promoted overlay
+                            // container isn't reliably in `painted_node_ids`, so the
+                            // painted-gated `css_needs_redraw` misses it too. Result:
+                            // once the push frame's dirty flags clear, no term keeps
+                            // the chain alive and the fade freezes until input.
+                            // Mirror the image_fade pattern: a dedicated,
+                            // non-painted-gated signal scoped to "an overlay is on
+                            // screen AND a CSS anim/transition is playing". Bounded —
+                            // `css_has_active()` clears when `is_playing` goes false
+                            // and `has_visible_overlays()` clears when the overlay
+                            // closes — so off-screen infinite keyframes elsewhere
+                            // still die (the reason `css_needs_redraw` is painted-gated).
+                            let overlay_css_needs_redraw = {
+                                // Cover BOTH overlay systems: cn menubar/dropdown
+                                // may live on the legacy `overlay_manager`, popover/
+                                // select on the newer `overlay_stack`.
+                                let mgr_present =
+                                    windowed_ctx.overlay_manager.has_visible_overlays();
+                                let stack_present =
+                                    blinc_layout::overlay_state::overlay_stack()
+                                        .lock()
+                                        .map(|s| s.has_visible_overlays())
+                                        .unwrap_or(false);
+                                let overlay_present = mgr_present || stack_present;
+                                let css_active = ws
+                                    .render_tree
+                                    .as_ref()
+                                    .is_some_and(|t| t.css_has_active());
+                                overlay_present && css_active
+                            };
+
+                            // CSS-activity edge repaints — one render-cache
+                            // invalidation on EITHER transition of
+                            // `css_has_active()`:
+                            //
+                            // * Rising edge (animations just started): the
+                            //   overlay's content may have been collected on
+                            //   a frame BEFORE `start_all_css_animations` ran
+                            //   (the known first-open ordering race), so the
+                            //   cached text pool has no composite-patch
+                            //   records and would render at full alpha over
+                            //   the fading panel. One slow walk re-collects
+                            //   with `is_playing == true`: promotion, patch
+                            //   records and baselines all captured.
+                            //
+                            // * Falling edge (animations settled): nothing on
+                            //   the fast path ever demotes the promoted
+                            //   region — the stale blit + base-alpha text
+                            //   pool would persist until the next input
+                            //   event. One slow walk demotes and re-emits the
+                            //   subtree at its exact final state.
+                            {
+                                let css_active_now = ws
+                                    .render_tree
+                                    .as_ref()
+                                    .is_some_and(|t| t.css_has_active());
+                                if ws.prev_css_active != css_active_now {
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "css_activity_edge",
+                                    );
+                                    frame_dirty.store(true, Ordering::Release);
+                                    window.request_redraw();
+                                }
+                                ws.prev_css_active = css_active_now;
+                            }
+
                             let any_redraw_signal = needs_animation_redraw
                                 || external_anim_tick
                                 || needs_cursor_redraw
@@ -7060,6 +7136,7 @@ impl WindowedApp {
                                 || needs_overlay_redraw
                                 || theme_animating
                                 || css_needs_redraw
+                                || overlay_css_needs_redraw
                                 || pointer_query_active
                                 || flow_needs_redraw
                                 || image_fade_needs_redraw;
@@ -7077,6 +7154,7 @@ impl WindowedApp {
                                     && !needs_overlay_redraw
                                     && !theme_animating
                                     && !css_needs_redraw
+                                    && !overlay_css_needs_redraw
                                     && !pointer_query_active
                                     && !flow_needs_redraw;
 

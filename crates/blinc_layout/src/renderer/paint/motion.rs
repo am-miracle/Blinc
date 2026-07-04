@@ -752,10 +752,25 @@ impl RenderTree {
         } else {
             binding_opacity
         };
+        // Composite-promoted CSS subtree: the animation opacity is written
+        // into `props.opacity` every frame (see css.rs) AND re-applied at
+        // composite time (`composite_css_layers_overlay` reads it from the
+        // store and applies it to the blit). Baking it in here double-applies
+        // it and — because the fast paths never re-bake — freezes the texture
+        // at the frame it was first baked (near-zero on a fade-in), so the
+        // overlay sits frozen mid-fade until a mouse-move forces a slow-path
+        // re-bake. Bake at base state, mirroring the motion path's
+        // `binding_opacity_for_bake` strip above; the per-frame composite blit
+        // drives the fade instead.
+        let bake_opacity = if pushed_for_css {
+            1.0
+        } else {
+            render_node.props.opacity
+        };
         let node_motion_opacity = motion_values
             .and_then(|m| m.opacity)
             .unwrap_or_else(|| binding_opacity_for_bake.unwrap_or(1.0))
-            * render_node.props.opacity;
+            * bake_opacity;
 
         // Combine with inherited opacity from parent motion containers
         // This ensures children fade together with their parent motion container

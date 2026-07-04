@@ -360,6 +360,25 @@ pub struct RenderContext {
     /// batch / overlay). Without this, text inside motion containers
     /// gets covered by their bg paint.
     cached_motion_subtree_text_prims: Option<Vec<GpuPrimitive>>,
+    /// Live-patch records for `cached_motion_subtree_text_prims`:
+    /// (prim index range, composite-promoted ancestor stable id). The
+    /// glyph prims in the range were baked at BASE alpha (the
+    /// ancestor's CSS animation opacity excluded); the dispatch helper
+    /// multiplies the live store opacity in per frame so overlay text
+    /// fades in lockstep with the composited bg blit, on fast-path
+    /// frames included. Cleared together with the pool.
+    motion_subtree_text_patch: Vec<(std::ops::Range<usize>, blinc_layout::tree::StableNodeId)>,
+    /// Per-promoted-ancestor baseline captured at collect time:
+    /// (region screen AABB, translate, scale) that the glyph geometry
+    /// was baked with. The dispatch patch re-anchors glyph centers
+    /// from this baseline to the live values using the same top-left
+    /// math as `blit_tight_texture_to_target`, so text tracks the
+    /// panel's translate/scale during the animation.
+    #[allow(clippy::type_complexity)]
+    composite_patch_baselines: std::collections::HashMap<
+        blinc_layout::tree::StableNodeId,
+        ([f32; 4], (f32, f32), (f32, f32)),
+    >,
     /// SVGs inside motion subtrees — same routing as the text prims
     /// above. Re-dispatched via `render_rasterized_svgs` after the
     /// overlay so the icon lands on top of its motion container's bg.
@@ -628,6 +647,14 @@ struct TextElement {
     /// bg primitives. Same routing principle as foreground text but
     /// triggered by ancestor motion instead of a foreground layer.
     in_motion_subtree: bool,
+    /// Nearest composite-promoted ancestor (CSS-animated subtree baked
+    /// to a layer texture and blitted per frame). When `Some`, the
+    /// composite animation's opacity is NOT baked into
+    /// `motion_opacity` at collect — the dispatch-time patch in
+    /// `dispatch_motion_subtree_text_overlay` multiplies the LIVE
+    /// store opacity into the glyph alpha instead, so text fades in
+    /// lockstep with the blitted bg on every frame (fast or slow).
+    composite_ancestor: Option<blinc_layout::tree::StableNodeId>,
 }
 
 /// Image element data for rendering
@@ -732,6 +759,11 @@ struct SvgElement {
     /// z=0 and render *under* the dialog/sheet/drawer card their
     /// container z-layered above the main UI.
     z_layer: u32,
+    /// Nearest composite-promoted ancestor — same live-patch contract
+    /// as `TextElement.composite_ancestor`: the composite animation's
+    /// opacity is excluded from `motion_opacity` at collect and
+    /// applied from the live store at dispatch.
+    composite_ancestor: Option<blinc_layout::tree::StableNodeId>,
 }
 
 /// Flow shader element — an element with `flow: <name>` that renders via a custom GPU pipeline
@@ -793,6 +825,8 @@ impl RenderContext {
             cached_glyphs_by_layer: None,
             cached_fg_glyphs: None,
             cached_motion_subtree_text_prims: None,
+            motion_subtree_text_patch: Vec::new(),
+            composite_patch_baselines: std::collections::HashMap::new(),
             cached_motion_subtree_svgs: None,
             cached_css_transformed_text_prims: None,
             svg_cache: LruCache::new(NonZeroUsize::new(SVG_CACHE_CAPACITY).unwrap()),
@@ -861,6 +895,7 @@ impl RenderContext {
         self.cached_glyphs_by_layer = None;
         self.cached_fg_glyphs = None;
         self.cached_motion_subtree_text_prims = None;
+        self.motion_subtree_text_patch.clear();
         self.cached_motion_subtree_svgs = None;
         self.cached_css_transformed_text_prims = None;
         // Compositor static cache rides on the same lifecycle as the
@@ -1727,6 +1762,107 @@ impl RenderContext {
                 None,
                 0.0,
             );
+        }
+    }
+
+    /// Dispatch the motion-subtree text + SVG overlay pools with the
+    /// LIVE composite-animation values patched in.
+    ///
+    /// Text glyphs / SVG icons under a composite-promoted CSS-animated
+    /// subtree are collected at BASE alpha (the animation's opacity is
+    /// excluded — see `TextElement::composite_ancestor`) because the
+    /// pools are cached and fast-path frames dispatch them unchanged.
+    /// This helper multiplies the current store opacity into the
+    /// cloned prims each frame and re-anchors glyph centers with the
+    /// same top-left math `blit_tight_texture_to_target` uses for the
+    /// baked bg, so text fades AND tracks the panel in lockstep with
+    /// the blit on every frame, fast or slow. The clone is cheap:
+    /// `render_primitives_overlay` re-uploads CPU prims on every call
+    /// anyway, and the cached pool stays at base values.
+    fn dispatch_motion_subtree_overlay_pools(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        target_view: &wgpu::TextureView,
+    ) {
+        // TEXT — alpha + blit-anchored center remap.
+        if let Some(mut prims) = self.cached_motion_subtree_text_prims.clone() {
+            if !prims.is_empty() {
+                if !self.motion_subtree_text_patch.is_empty() {
+                    let dpi = tree.scale_factor().max(1.0);
+                    if let Ok(store) = tree.css_anim_store().lock() {
+                        for (range, sid) in &self.motion_subtree_text_patch {
+                            let props = store
+                                .animations
+                                .get(sid)
+                                .filter(|a| a.is_playing)
+                                .map(|a| &a.current_properties)
+                                .or_else(|| {
+                                    store
+                                        .transitions
+                                        .get(sid)
+                                        .filter(|t| t.is_playing)
+                                        .map(|t| &t.current_properties)
+                                });
+                            let Some(props) = props else { continue };
+                            let live_opacity = props.opacity.unwrap_or(1.0);
+                            let t1 = (
+                                props.translate_x.unwrap_or(0.0),
+                                props.translate_y.unwrap_or(0.0),
+                            );
+                            let s1 = (props.scale_x.unwrap_or(1.0), props.scale_y.unwrap_or(1.0));
+                            let baseline = self.composite_patch_baselines.get(sid).copied();
+                            for prim in &mut prims[range.clone()] {
+                                prim.color[3] *= live_opacity;
+                                if let Some((aabb, t0, s0)) = baseline {
+                                    // p_base = aabb + (p0 - aabb - t0*dpi)/s0
+                                    // p1     = aabb + t1*dpi + p_base_rel*s1
+                                    let cx = prim.bounds[0] + prim.bounds[2] * 0.5;
+                                    let cy = prim.bounds[1] + prim.bounds[3] * 0.5;
+                                    let rel_x = (cx - aabb[0] - t0.0 * dpi) / s0.0.max(1e-6);
+                                    let rel_y = (cy - aabb[1] - t0.1 * dpi) / s0.1.max(1e-6);
+                                    let nx = aabb[0] + t1.0 * dpi + rel_x * s1.0;
+                                    let ny = aabb[1] + t1.1 * dpi + rel_y * s1.1;
+                                    prim.bounds[0] = nx - prim.bounds[2] * 0.5;
+                                    prim.bounds[1] = ny - prim.bounds[3] * 0.5;
+                                }
+                            }
+                        }
+                    }
+                }
+                self.rebind_glyph_atlas_for_overlay();
+                self.renderer.render_primitives_overlay(target_view, &prims);
+            }
+        }
+        // SVG — alpha only (icons are small; the settle repaint lands
+        // the exact final position when the animation completes).
+        if let Some(mut svgs) = self.cached_motion_subtree_svgs.clone() {
+            if !svgs.is_empty() {
+                if svgs.iter().any(|s| s.composite_ancestor.is_some()) {
+                    if let Ok(store) = tree.css_anim_store().lock() {
+                        for svg in &mut svgs {
+                            let Some(sid) = svg.composite_ancestor else {
+                                continue;
+                            };
+                            let props = store
+                                .animations
+                                .get(&sid)
+                                .filter(|a| a.is_playing)
+                                .map(|a| &a.current_properties)
+                                .or_else(|| {
+                                    store
+                                        .transitions
+                                        .get(&sid)
+                                        .filter(|t| t.is_playing)
+                                        .map(|t| &t.current_properties)
+                                });
+                            let Some(props) = props else { continue };
+                            svg.motion_opacity *= props.opacity.unwrap_or(1.0);
+                        }
+                    }
+                }
+                let dpi = tree.scale_factor();
+                self.render_rasterized_svgs(target_view, &svgs, dpi);
+            }
         }
     }
 
@@ -5737,6 +5873,7 @@ impl RenderContext {
         // nested composite-promoted ancestors correctly — descendants
         // multiply their effective opacity from the outermost composite
         // ancestor through to the innermost.
+        self.composite_patch_baselines.clear();
         let composite_layer_opacities: std::collections::HashMap<blinc_layout::LayoutNodeId, f32> = {
             let promo = tree.composite_promotion();
             let store = tree.css_anim_store();
@@ -5753,6 +5890,24 @@ impl RenderContext {
                             return None;
                         }
                         let opacity = anim.current_properties.opacity?;
+                        // Baseline for the dispatch-time text patch: the
+                        // promoted region's screen AABB plus the
+                        // translate/scale this collect bakes into the
+                        // glyph geometry. The patch re-anchors glyph
+                        // centers with the same top-left math the
+                        // composite blit uses, so text tracks the
+                        // blitted bg exactly.
+                        if let Some(region) = tree.dynamic_regions().get(&layout) {
+                            let p = &anim.current_properties;
+                            self.composite_patch_baselines.insert(
+                                stable,
+                                (
+                                    region.screen_aabb,
+                                    (p.translate_x.unwrap_or(0.0), p.translate_y.unwrap_or(0.0)),
+                                    (p.scale_x.unwrap_or(1.0), p.scale_y.unwrap_or(1.0)),
+                                ),
+                            );
+                        }
                         Some((layout, opacity))
                     })
                     .collect()
@@ -5790,7 +5945,8 @@ impl RenderContext {
                 false, // No ancestor pending motion at root
                 false, // No ancestor motion container at root
                 &composite_layer_opacities,
-                1.0, // Initial composite-layer opacity (no ancestor promoted)
+                1.0,  // Initial composite-layer opacity (no ancestor promoted)
+                None, // No composite-promoted ancestor at root
             );
         }
 
@@ -5870,9 +6026,15 @@ impl RenderContext {
         composite_layer_opacities: &std::collections::HashMap<blinc_layout::LayoutNodeId, f32>,
         // Effective composite-layer opacity inherited from the nearest
         // composite-promoted ancestor (multiplied through nested
-        // promotions). Multiplied into descendant text / SVG / image
-        // motion_opacity at construction.
+        // promotions). Multiplied into descendant IMAGE opacity at
+        // construction. Text / SVG exclude it instead — they carry
+        // `composite_ancestor` and get the LIVE factor applied at
+        // dispatch (see `dispatch_motion_subtree_text_overlay`).
         inherited_composite_layer_opacity: f32,
+        // Nearest composite-promoted ancestor with a playing CSS
+        // animation, threaded down so text / SVG elements can record
+        // it for the dispatch-time live patch.
+        nearest_composite_ancestor: Option<blinc_layout::tree::StableNodeId>,
     ) {
         use blinc_layout::Material;
 
@@ -5951,6 +6113,16 @@ impl RenderContext {
             composite_layer_opacities.get(&node).copied().unwrap_or(1.0);
         let effective_composite_layer_opacity =
             inherited_composite_layer_opacity * node_composite_layer_opacity;
+        // Track the NEAREST promoted ancestor for the dispatch-time
+        // text/SVG live patch. Nested playing promotions are rare
+        // (overlays don't nest inside other animating promoted
+        // subtrees); the patch applies the nearest ancestor's live
+        // opacity, which is exact for the single-ancestor case.
+        let nearest_composite_ancestor = if composite_layer_opacities.contains_key(&node) {
+            tree.stable_id(node).or(nearest_composite_ancestor)
+        } else {
+            nearest_composite_ancestor
+        };
         let effective_motion_translate = (
             inherited_motion_translate.0 + node_motion_translate.0,
             inherited_motion_translate.1 + node_motion_translate.1,
@@ -6458,10 +6630,17 @@ impl RenderContext {
                         italic: text_data.italic,
                         v_align: text_data.v_align,
                         clip_bounds: scaled_clip,
+                        // Composite-promoted subtrees: bake at BASE alpha
+                        // (factor excluded); the dispatch-time patch
+                        // applies the LIVE store opacity every frame.
                         motion_opacity: effective_motion_opacity
                             * render_node.props.opacity
                             * inherited_css_opacity
-                            * effective_composite_layer_opacity,
+                            * if nearest_composite_ancestor.is_some() {
+                                1.0
+                            } else {
+                                effective_composite_layer_opacity
+                            },
                         wrap: !is_nowrap && text_data.wrap,
                         line_height: text_data.line_height,
                         measured_width: scaled_measured_width,
@@ -6495,6 +6674,7 @@ impl RenderContext {
                         transform_3d_layer: inside_3d_layer.clone(),
                         is_foreground: children_inside_foreground,
                         in_motion_subtree: inside_motion_subtree,
+                        composite_ancestor: nearest_composite_ancestor,
                     });
                 }
                 ElementType::Svg(svg_data) => {
@@ -6570,15 +6750,22 @@ impl RenderContext {
                         stroke_dashoffset: render_node.props.stroke_dashoffset,
                         svg_path_data: render_node.props.svg_path_data.clone(),
                         clip_bounds: scaled_clip,
+                        // Same base-alpha contract as TextElement:
+                        // composite factor applied live at dispatch.
                         motion_opacity: effective_motion_opacity
                             * render_node.props.opacity
                             * inherited_css_opacity
-                            * effective_composite_layer_opacity,
+                            * if nearest_composite_ancestor.is_some() {
+                                1.0
+                            } else {
+                                effective_composite_layer_opacity
+                            },
                         css_affine: node_css_affine,
                         tag_overrides: render_node.props.svg_tag_styles.clone(),
                         transform_3d_layer: inside_3d_layer.clone(),
                         in_motion_subtree: inside_motion_subtree,
                         z_layer: *z_layer,
+                        composite_ancestor: nearest_composite_ancestor,
                     });
                 }
                 ElementType::Image(image_data) => {
@@ -6982,10 +7169,16 @@ impl RenderContext {
                             italic,
                             v_align: styled_data.v_align,
                             clip_bounds: scaled_clip,
+                            // Base-alpha contract: composite factor
+                            // applied live at dispatch.
                             motion_opacity: effective_motion_opacity
                                 * render_node.props.opacity
                                 * inherited_css_opacity
-                                * effective_composite_layer_opacity,
+                                * if nearest_composite_ancestor.is_some() {
+                                    1.0
+                                } else {
+                                    effective_composite_layer_opacity
+                                },
                             wrap: false, // Don't wrap individual segments
                             line_height: styled_data.line_height,
                             measured_width: segment_width,
@@ -7003,6 +7196,7 @@ impl RenderContext {
                             transform_3d_layer: inside_3d_layer.clone(),
                             is_foreground: children_inside_foreground,
                             in_motion_subtree: inside_motion_subtree,
+                            composite_ancestor: nearest_composite_ancestor,
                         });
 
                         x_offset += segment_width;
@@ -7112,6 +7306,7 @@ impl RenderContext {
                 child_inside_motion_subtree,
                 composite_layer_opacities,
                 effective_composite_layer_opacity,
+                nearest_composite_ancestor,
             );
         }
 
@@ -7610,6 +7805,7 @@ impl RenderContext {
             self.cached_glyphs_by_layer = None;
             self.cached_fg_glyphs = None;
             self.cached_motion_subtree_text_prims = None;
+            self.motion_subtree_text_patch.clear();
             self.cached_motion_subtree_svgs = None;
             self.cached_css_transformed_text_prims = None;
         }
@@ -7925,19 +8121,7 @@ impl RenderContext {
                 // so the motion container's scale / translate / rotate
                 // applies to each glyph. SVGs go through the same
                 // rasterized-image dispatch the static-cache path uses.
-                if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
-                    if !motion_text_prims.is_empty() {
-                        self.rebind_glyph_atlas_for_overlay();
-                        self.renderer
-                            .render_primitives_overlay(target_view, &motion_text_prims);
-                    }
-                }
-                if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
-                    if !motion_svgs.is_empty() {
-                        let dpi = tree.scale_factor();
-                        self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
-                    }
-                }
+                self.dispatch_motion_subtree_overlay_pools(tree, target_view);
                 if !overlay.meshes.is_empty() {
                     dispatch_pending_meshes(
                         &mut self.renderer,
@@ -8056,6 +8240,7 @@ impl RenderContext {
                 self.cached_glyphs_by_layer = None;
                 self.cached_fg_glyphs = None;
                 self.cached_motion_subtree_text_prims = None;
+                self.motion_subtree_text_patch.clear();
                 self.cached_motion_subtree_svgs = None;
                 self.cached_css_transformed_text_prims = None;
                 damage_rect_failed = true;
@@ -8087,6 +8272,7 @@ impl RenderContext {
                         self.cached_glyphs_by_layer = None;
                         self.cached_fg_glyphs = None;
                         self.cached_motion_subtree_text_prims = None;
+                        self.motion_subtree_text_patch.clear();
                         self.cached_motion_subtree_svgs = None;
                         self.cached_css_transformed_text_prims = None;
                     } else {
@@ -8289,19 +8475,7 @@ impl RenderContext {
                 // motion container's scale / translate / rotate applies
                 // to each glyph. SVGs go through the same rasterized-
                 // image dispatch the static-cache path uses.
-                if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
-                    if !motion_text_prims.is_empty() {
-                        self.rebind_glyph_atlas_for_overlay();
-                        self.renderer
-                            .render_primitives_overlay(target_view, &motion_text_prims);
-                    }
-                }
-                if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
-                    if !motion_svgs.is_empty() {
-                        let dpi = tree.scale_factor();
-                        self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
-                    }
-                }
+                self.dispatch_motion_subtree_overlay_pools(tree, target_view);
                 if !overlay.meshes.is_empty() {
                     dispatch_pending_meshes(
                         &mut self.renderer,
@@ -8567,19 +8741,7 @@ impl RenderContext {
         // those subtrees has to render afterwards to land on top of
         // the bg paint. PRIM_TEXT primitives carry the motion affine
         // so the glyphs scale / translate with the bg.
-        if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
-            if !motion_text_prims.is_empty() {
-                self.rebind_glyph_atlas_for_overlay();
-                self.renderer
-                    .render_primitives_overlay(target_view, &motion_text_prims);
-            }
-        }
-        if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
-            if !motion_svgs.is_empty() {
-                let dpi = tree.scale_factor();
-                self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
-            }
-        }
+        self.dispatch_motion_subtree_overlay_pools(tree, target_view);
         // Composited CSS layers (slow path's composite site) — same
         // overlay step the fast paths do, so the texture for a
         // freshly-promoted region gets visible content on the very
@@ -9100,6 +9262,20 @@ impl RenderContext {
                     .or_insert_with(|| (info.clone(), Vec::new()))
                     .1
                     .push(text);
+            } else if text.composite_ancestor.is_some() {
+                // Text under a composite-promoted CSS-animated subtree
+                // (e.g. a `.foreground()` select / combobox panel mid
+                // enter-fade) is collected at BASE alpha and repaid the
+                // live opacity at dispatch via `motion_subtree_text_patch`.
+                // That patch is built ONLY while iterating
+                // `motion_subtree_texts`, so this must win over
+                // `is_foreground` — otherwise the fg pool draws the text
+                // at full alpha on top of the still-fading baked panel
+                // (the "text before the container" + "double text"
+                // symptom). Once the animation settles the falling-edge
+                // repaint demotes the subtree, `composite_ancestor`
+                // clears, and the text falls back to the fg pool below.
+                motion_subtree_texts.push(text);
             } else if text.is_foreground {
                 fg_texts.push(text);
             } else if text.in_motion_subtree {
@@ -9116,7 +9292,12 @@ impl RenderContext {
         for svg in all_svgs {
             if let Some(ref info) = svg.transform_3d_layer {
                 layer_3d_svgs.entry(info.node_id).or_default().push(svg);
-            } else if svg.in_motion_subtree {
+            } else if svg.in_motion_subtree || svg.composite_ancestor.is_some() {
+                // Same contract as the text partition above: a promoted
+                // `.foreground()` panel's icons must ride the motion pool
+                // so `dispatch_motion_subtree_overlay_pools` applies the
+                // live composite opacity, instead of painting at full
+                // alpha over the fading panel.
                 motion_subtree_svgs.push(svg);
             } else {
                 svgs.push(svg);
@@ -9464,7 +9645,12 @@ impl RenderContext {
         // container's scale / translate / rotate is applied per-glyph,
         // so the text follows the bg as the animation progresses.
         let mut motion_subtree_text_prims: Vec<GpuPrimitive> = Vec::new();
+        let mut motion_subtree_text_patch: Vec<(
+            std::ops::Range<usize>,
+            blinc_layout::tree::StableNodeId,
+        )> = Vec::new();
         for text in &motion_subtree_texts {
+            let patch_start = motion_subtree_text_prims.len();
             if let Some([clip_x, clip_y, clip_w, clip_h]) = text.clip_bounds {
                 let text_right = text.x + text.width;
                 let text_bottom = text.y + text.height;
@@ -9573,6 +9759,15 @@ impl RenderContext {
                     motion_subtree_text_prims.push(prim);
                 }
             }
+            // Record the emitted range for the dispatch-time live
+            // patch when this text sits under a composite-promoted
+            // ancestor (its alpha was baked at BASE, factor excluded).
+            let patch_end = motion_subtree_text_prims.len();
+            if patch_end > patch_start {
+                if let Some(ancestor) = text.composite_ancestor {
+                    motion_subtree_text_patch.push((patch_start..patch_end, ancestor));
+                }
+            }
         }
 
         // Cache the prepared glyph + CSS-transformed-prim vecs for
@@ -9591,6 +9786,7 @@ impl RenderContext {
         self.cached_glyphs_by_layer = Some(glyphs_by_layer.clone());
         self.cached_fg_glyphs = Some(fg_glyphs.clone());
         self.cached_motion_subtree_text_prims = Some(motion_subtree_text_prims.clone());
+        self.motion_subtree_text_patch = motion_subtree_text_patch;
         self.cached_motion_subtree_svgs = Some(motion_subtree_svgs.clone());
         self.cached_css_transformed_text_prims = Some(css_transformed_text_prims.clone());
 
@@ -10181,18 +10377,7 @@ impl RenderContext {
         // this, motion_demo's inner labels, cn::tabs content,
         // context-menu dropdowns, and any motion-animated SVG icon
         // render invisible.
-        if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
-            if !motion_text_prims.is_empty() {
-                self.rebind_glyph_atlas_for_overlay();
-                self.renderer
-                    .render_primitives_overlay(target, &motion_text_prims);
-            }
-        }
-        if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
-            if !motion_svgs.is_empty() {
-                self.render_rasterized_svgs(target, &motion_svgs, scale_factor);
-            }
-        }
+        self.dispatch_motion_subtree_overlay_pools(tree, target);
 
         // Composited CSS layers — blit each promoted subtree's
         // texture with the current animation transform. Same as

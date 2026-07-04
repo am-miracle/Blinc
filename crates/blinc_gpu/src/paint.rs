@@ -670,6 +670,27 @@ impl<'a> GpuPaintContext<'a> {
         }
     }
 
+    /// Effective foreground routing for primitive emission.
+    ///
+    /// Honors `is_foreground` normally, but forces BACKGROUND routing
+    /// while a composite layer is active. Inside a composite-promoted
+    /// subtree the whole scratch batch is baked to one texture and
+    /// blitted as a unit, so the global foreground/background split is
+    /// meaningless there — and worse, routing to
+    /// `foreground_primitives` strands those prims: the region bracket
+    /// (`bg_primitive_count`), its AABB (`bg_primitive_aabb`) and the
+    /// bake (`render_subtree_to_layer_texture`) all read only
+    /// `.primitives`. A `.foreground()` panel with a CSS enter
+    /// animation would otherwise emit its bg/border/shadow into
+    /// `foreground_primitives`, record an empty region (end == start),
+    /// never bake, and never blit — the exact select/combobox fade
+    /// break. Collapsing to `.primitives` while promoted makes the
+    /// existing single-list bracket + bake work unchanged.
+    #[inline]
+    fn emit_foreground(&self) -> bool {
+        self.is_foreground && self.active_composite_layer.is_none()
+    }
+
     /// Immutable counterpart to [`Self::active_batch_mut`] — used
     /// by readers like `bg_primitive_count` and `bg_primitive_aabb`
     /// so they bracket the right batch.
@@ -2151,10 +2172,23 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             if w <= 0.0 || h <= 0.0 {
                 continue;
             }
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x + w);
-            max_y = max_y.max(y + h);
+            // Drop shadows render OUTSIDE `bounds`: the shadow vertex
+            // shader expands the quad by `blur * 3 + |offset|` and the
+            // fragment adds spread. Without padding here, the
+            // composite-layer bake (which sizes its tight texture from
+            // this AABB) crops the halo, so promoted subtrees lose
+            // their box-shadow for the duration of the promotion.
+            // 3 = Shadow, 5 = CircleShadow (inner shadows paint inside
+            // `bounds` and need no padding).
+            let expand = if p.type_info[0] == 3 || p.type_info[0] == 5 {
+                p.shadow[2] * 3.0 + p.shadow[0].abs() + p.shadow[1].abs() + p.shadow[3].max(0.0)
+            } else {
+                0.0
+            };
+            min_x = min_x.min(x - expand);
+            min_y = min_y.min(y - expand);
+            max_x = max_x.max(x + w + expand);
+            max_y = max_y.max(y + h + expand);
         }
         if min_x.is_finite() && max_x > min_x && max_y > min_y {
             Some([min_x, min_y, max_x - min_x, max_y - min_y])
@@ -2421,7 +2455,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         if !tessellated.is_empty() {
             let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
-            if self.is_foreground {
+            if self.emit_foreground() {
                 self.active_batch_mut()
                     .push_foreground_path_with_brush_info(
                         tessellated,
@@ -2499,7 +2533,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         if !tessellated.is_empty() {
             let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
-            if self.is_foreground {
+            if self.emit_foreground() {
                 self.active_batch_mut()
                     .push_foreground_path_with_brush_info(
                         tessellated,
@@ -2867,7 +2901,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3043,7 +3077,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3138,7 +3172,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3262,7 +3296,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3361,7 +3395,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3436,7 +3470,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3627,7 +3661,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 prim.type_info[2] = clip_kind_u32;
                 prim.clip_bounds = clip_bounds;
                 prim.clip_radius = clip_radius;
-                if self.is_foreground {
+                if self.emit_foreground() {
                     self.active_batch_mut().push_foreground(prim);
                 } else {
                     self.active_batch_mut().push(prim);
@@ -3730,7 +3764,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3798,7 +3832,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3854,7 +3888,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -3909,7 +3943,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
-        if self.is_foreground {
+        if self.emit_foreground() {
             self.active_batch_mut().push_foreground(primitive);
         } else {
             self.active_batch_mut().push(primitive);
@@ -4635,7 +4669,7 @@ impl<'a> GpuPaintContext<'a> {
             };
             prim.local_affine = [1.0, 0.0, 0.0, 1.0];
 
-            if self.is_foreground {
+            if self.emit_foreground() {
                 self.active_batch_mut().push_foreground(prim);
             } else {
                 self.active_batch_mut().push(prim);
