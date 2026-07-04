@@ -950,33 +950,46 @@ impl ScrollPhysics {
                 // Apply momentum scrolling (for touch devices)
                 // On macOS, the system provides momentum via scroll events instead.
 
-                // Apply velocity to position
-                let dx = self.velocity_x * dt;
-                let dy = self.velocity_y * dt;
+                // Exponential decay — matches the real-world feel of a
+                // flick coasting to a stop. Removes a *fraction* of
+                // velocity per frame (not a constant `deceleration * dt`,
+                // which felt draggy near the end: the same absolute
+                // slowdown at 20 px/s as at 2000 px/s), so the tail glides
+                // out while high velocities still shed quickly.
+                //
+                // The config's `deceleration` field (px/s²) is the single
+                // knob, reinterpreted as a decay-rate driver: `k =
+                // deceleration / V_REF` is 1/τ of the exponential (s⁻¹);
+                // `V_REF = 500 px/s` makes the default `deceleration =
+                // 1500` a friction of ≈0.95 per 60Hz frame (iOS-like).
+                const V_REF: f32 = 500.0;
+                let k = self.config.deceleration / V_REF;
+                let friction = (-k * dt).exp();
+
+                // Position update via the CLOSED-FORM integral of the
+                // decay over this frame — ∫₀^dt v·e^(−k·s) ds =
+                // (v/k)(1 − e^(−k·dt)) = (v/k)(1 − friction) — NOT the
+                // explicit-Euler `v·dt`. The analytic form is exact and
+                // frame-rate-independent: the offset lands exactly on the
+                // decay curve for the elapsed wall-clock time, so an
+                // uneven or dropped frame advances by exactly the right
+                // distance and never shows a step. `v·dt` instead moves a
+                // distance that scales linearly with each frame's jitter,
+                // which reads as stutter in the coast — worst over
+                // remote/RDP where frame delivery isn't perfectly even.
+                // Falls back to `v·dt` when k≈0 (deceleration disabled →
+                // constant-velocity glide).
+                let (dx, dy) = if k > 1e-4 {
+                    let travel = (1.0 - friction) / k;
+                    (self.velocity_x * travel, self.velocity_y * travel)
+                } else {
+                    (self.velocity_x * dt, self.velocity_y * dt)
+                };
 
                 // Check if we would hit bounds
                 let new_offset_y = self.offset_y + dy;
                 let new_offset_x = self.offset_x + dx;
 
-                // Exponential decay — matches the real-world feel of a
-                // flick coasting to a stop. The previous implementation
-                // subtracted a constant rate `deceleration * dt` every
-                // frame, which felt draggy near the end (same absolute
-                // slowdown at 20 px/s as at 2000 px/s). Exponential decay
-                // instead removes a *fraction* of velocity per frame, so
-                // the tail glides out smoothly while high velocities still
-                // shed quickly.
-                //
-                // The config's `deceleration` field (px/s²) is kept as the
-                // single knob — reinterpreted here as a decay-rate driver.
-                // `k = deceleration / V_REF` is the 1/τ of the exponential
-                // (s⁻¹); `V_REF = 500 px/s` is the reference velocity
-                // chosen so the default `deceleration = 1500` produces a
-                // friction factor of ≈0.95 per 60Hz frame (iOS-like
-                // momentum). Higher deceleration values decay faster.
-                const V_REF: f32 = 500.0;
-                let k = self.config.deceleration / V_REF;
-                let friction = (-k * dt).exp();
                 self.velocity_x *= friction;
                 self.velocity_y *= friction;
 
