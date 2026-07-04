@@ -26,7 +26,7 @@ pub struct BlincConfig {
 impl Default for BlincConfig {
     fn default() -> Self {
         Self {
-            max_primitives: 10_000,
+            max_primitives: 20_000,
             max_glass_primitives: 1_000,
             max_glyphs: 50_000,
             sample_count: 4, // 4x MSAA for path anti-aliasing
