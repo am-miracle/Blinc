@@ -5799,7 +5799,23 @@ impl RenderContext {
                         d,
                     )
                 } else {
-                    (svg.x, svg.y, svg.width, svg.height, 1.0, 0.0, 0.0, 1.0)
+                    // Pixel-snap the icon origin to the physical grid, same
+                    // crispness fix as text glyph origins: a fractional dest
+                    // position (from fractional layout coords) blurs a 1:1
+                    // rasterized icon through the Linear image sampler at 1x.
+                    // Icons are typically integer-sized, so snapping the
+                    // origin sharpens the whole quad. Only the untransformed
+                    // case — the `css_affine` branch keeps sub-pixel motion.
+                    (
+                        svg.x.round(),
+                        svg.y.round(),
+                        svg.width,
+                        svg.height,
+                        1.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    )
                 };
 
             // Create instance with atlas UV coordinates
