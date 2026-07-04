@@ -243,6 +243,18 @@ impl RenderTree {
         }
         let now_ms = crate::widgets::text_input::elapsed_ms() as f64;
 
+        // While a text input owns focus, route scroll ONLY to real
+        // scroll-physics containers (pages, textareas), never to a bare
+        // SCROLL handler. A handler-only target is an app-level scroll
+        // gesture — canvas zoom/pan is the motivating case — that must
+        // NOT fire from stray trackpad inertia or wheel ticks while the
+        // user is typing. Physics containers still scroll, and an inner
+        // textarea still steals from the outer page because it is the
+        // first physics node in the leaf→root chain. This replaces the
+        // old blunt "skip all scroll when an input is focused" gate in
+        // windowed.rs, which starved normal scroll containers too.
+        let text_input_focused = crate::widgets::text_input::has_focused_text_input();
+
         let mut target: Option<LayoutNodeId> = None;
         for &node_id in &chain {
             let has_handler = self.stable_id(node_id).is_some_and(|sid| {
@@ -250,7 +262,12 @@ impl RenderTree {
                     .has_handler(sid, blinc_core::events::event_types::SCROLL)
             });
             let has_registered_physics = self.scroll_physics.contains_key(&node_id);
-            if has_handler || has_registered_physics {
+            let eligible = if text_input_focused {
+                has_registered_physics
+            } else {
+                has_handler || has_registered_physics
+            };
+            if eligible {
                 target = Some(node_id);
                 break;
             }
@@ -351,6 +368,9 @@ impl RenderTree {
 
         // See `dispatch_scroll_chain` for the routing rationale: the
         // cursor's current scrollable gets the delta, with no chaining.
+        // Mirror its focus rule too — while a text input is focused,
+        // route only to physics containers, not bare SCROLL handlers.
+        let text_input_focused = crate::widgets::text_input::has_focused_text_input();
         let mut target: Option<LayoutNodeId> = None;
         for &node_id in &chain {
             let has_handler = self.stable_id(node_id).is_some_and(|sid| {
@@ -358,7 +378,12 @@ impl RenderTree {
                     .has_handler(sid, blinc_core::events::event_types::SCROLL)
             });
             let has_registered_physics = self.scroll_physics.contains_key(&node_id);
-            if has_handler || has_registered_physics {
+            let eligible = if text_input_focused {
+                has_registered_physics
+            } else {
+                has_handler || has_registered_physics
+            };
+            if eligible {
                 target = Some(node_id);
                 break;
             }

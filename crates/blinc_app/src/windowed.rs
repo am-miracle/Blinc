@@ -4916,27 +4916,6 @@ impl WindowedApp {
                                 } else if has_overlay_backdrop {
                                     // Skip scroll when overlay is visible to prevent background scrolling
                                     tracing::trace!("Skipping scroll delta - overlay with backdrop is visible");
-                                } else if blinc_layout::widgets::has_focused_text_input() {
-                                    // A text widget owns the keyboard / scroll focus. The
-                                    // scroll event belongs to the input's scroll machinery
-                                    // (cursor-into-view, textarea scroll-physics), NOT to
-                                    // canvas-kit underneath. Trackpad inertia from a prior
-                                    // gesture, or system-synthesized noop scrolls during
-                                    // popover open, would otherwise accumulate canvas zoom
-                                    // while the user is interacting with the input. The
-                                    // dispatch_scroll_chain at line ~4852 still runs so
-                                    // the FOCUSED widget itself gets the event; we just
-                                    // skip the canvas-zoom side of that.
-                                    //
-                                    // Symptom this fixes (verified via the 06-14
-                                    // canvas_viewport_diag log capture): opening the
-                                    // inline title editor on node_editor_demo accumulated
-                                    // ~5-10 SCROLL events with cursor=(0,0) and small
-                                    // delta_y, each calling zoom_at and creeping the
-                                    // canvas zoom toward 2x while the popover was visible.
-                                    tracing::trace!(
-                                        "Skipping scroll delta - focused text input owns it"
-                                    );
                                 } else {
                                     tracing::trace!(
                                         "Scroll dispatch: pos=({:.1}, {:.1}) delta=({:.1}, {:.1})",
