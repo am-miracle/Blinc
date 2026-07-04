@@ -99,6 +99,12 @@ const FPS_WINDOW_FRAMES: usize = 60;
 /// [`AnimationFps::Adaptive`]; `Fixed` / `Refresh` skip it.
 pub(crate) struct FpsAdapter {
     current_cap: u32,
+    /// Upper bound the cap may raise to — set to the display refresh
+    /// rate. Raising above the panel refresh wastes renders and, when
+    /// the cap isn't an integer multiple of vsync (90 on a 60 Hz
+    /// panel), beats against the compositor's presentation cadence →
+    /// visible judder in continuous animations (spinner, scroll decel).
+    ceiling: u32,
     window: Vec<u64>,
     consecutive_overshoot_windows: u32,
     consecutive_headroom_windows: u32,
@@ -108,6 +114,9 @@ impl FpsAdapter {
     pub(crate) fn new(initial_cap: u32) -> Self {
         Self {
             current_cap: clamp_to_ladder(initial_cap),
+            // Until the real refresh rate is known, allow the full
+            // ladder; `set_ceiling` narrows it at window resume.
+            ceiling: *FPS_LADDER.last().unwrap(),
             window: Vec::with_capacity(FPS_WINDOW_FRAMES),
             consecutive_overshoot_windows: 0,
             consecutive_headroom_windows: 0,
@@ -116,6 +125,17 @@ impl FpsAdapter {
 
     pub(crate) fn current_cap(&self) -> u32 {
         self.current_cap
+    }
+
+    /// Clamp the adaptive cap to the display refresh rate. The adapter
+    /// never raises past this, and an already-raised cap is pulled back
+    /// down immediately. Called at window resume once the panel's
+    /// refresh is known.
+    pub(crate) fn set_ceiling(&mut self, ceiling: u32) {
+        self.ceiling = ceiling.max(FPS_LADDER[0]);
+        if self.current_cap > self.ceiling {
+            self.current_cap = self.ceiling;
+        }
     }
 
     /// Record a frame's total wall-clock time. Returns the cap to
@@ -157,7 +177,7 @@ impl FpsAdapter {
             self.consecutive_headroom_windows = self.consecutive_headroom_windows.saturating_add(1);
             self.consecutive_overshoot_windows = 0;
             if self.consecutive_headroom_windows >= FPS_WINDOWS_TO_RAISE {
-                let new_cap = ladder_step_up(self.current_cap);
+                let new_cap = ladder_step_up(self.current_cap).min(self.ceiling);
                 if new_cap != self.current_cap {
                     tracing::info!(
                         "fps_adapter: raising cap {} -> {} (median={}us budget={}us)",
@@ -479,43 +499,36 @@ impl WindowState {
 
 /// Pick the best present mode for the current surface.
 ///
-/// On Linux, `Fifo` (what `AutoVsync` resolves to) can pathologically
-/// BLOCK `get_current_texture()` for ~1 s per acquire when the
-/// compositor transiently can't release a swapchain image. wgpu's
-/// internal acquire timeout is one second; a stretch of consecutive
-/// timeouts starves the winit event loop because each blocking call
-/// holds the redraw branch for that full second — symptom from real
-/// user reports: clicks taking multiple seconds to land, then the
-/// UI appears frozen even though state mutations are firing
-/// underneath.
-///
 /// Preference order on Linux:
-/// 1. `Immediate` — non-blocking, may tear. Preferred because Mesa's
-///    `Mailbox` implementation on Intel + Wayland still blocks
-///    acquire in practice on some compositors. Tearing is acceptable
-///    when the alternative is a multi-second frozen UI.
-/// 2. `Mailbox` — non-blocking with frame replacement; smoother than
-///    Immediate on compositors where Mailbox is honoured.
-/// 3. `FifoRelaxed` — Fifo that allows tearing under late frames.
-/// 4. `AutoVsync` — strict Fifo, last resort.
+/// 1. `Fifo` — strict vsync. Correct present mode: no tearing, energy-
+///    efficient, and its presentation is paced to the display's Done
+///    cadence, which matters most when the "display" is a compositor
+///    SCREEN-CAPTURE (remote desktop / RDP / screen recording): the
+///    capturer samples a vsync-synchronised swapchain cleanly, whereas
+///    an unsynchronised `Immediate` swapchain is captured mid-flip and
+///    reads as judder even though local rendering is fine.
+/// 2. `FifoRelaxed` — vsync that tears only under late frames.
+/// 3. `Mailbox` — non-blocking with frame replacement.
+/// 4. `Immediate` — non-blocking, may tear. Last resort.
+/// 5. `AutoVsync`.
 ///
-/// The previous order (Mailbox → Immediate) matched GPUI's choice,
-/// but GPUI registers `wl_surface::frame()` callbacks themselves and
-/// only calls `get_current_texture()` after a frame-ready signal —
-/// so they never hit the blocking path even if Mailbox-on-Mesa is
-/// buggy. winit 0.30 implements similar gating via
-/// `Window::pre_present_notify` (we call it), but the gating fires
-/// only after a successful present; if every acquire times out
-/// before we can present, the gating never engages and we're back
-/// in the busy-loop. Immediate sidesteps the trap because it's a
-/// different VK present-mode code path in Mesa.
+/// HISTORY: this list was previously inverted (`Immediate` first).
+/// `Fifo` can BLOCK `get_current_texture()` for ~1 s per acquire when
+/// a Wayland compositor (Mesa/Mutter) transiently can't release a
+/// swapchain image — a stretch of those timeouts starved the winit
+/// loop and froze the UI, and `Immediate` sidestepped it by taking a
+/// different Mesa present-mode path. That starvation is now fixed at
+/// its source: the Wayland keep-alive self-drive keeps presents
+/// flowing so the compositor never withholds an image, and
+/// reconfigure-on-`Timeout` recovers if one still slips through (see
+/// the keep-alive notes at the frame loop). So vsync is safe again,
+/// and `Immediate` — which the user could observe as judder over RDP —
+/// is demoted. `BLINC_PRESENT_MODE=immediate` restores the old
+/// behaviour if a specific compositor still misbehaves.
 ///
 /// The chosen mode is logged at startup so end users can confirm
-/// which path their compositor surfaced.
-///
-/// Other platforms keep `AutoVsync` — `Fifo` is the right call for
-/// energy efficiency and frame pacing when the compositor isn't
-/// pathological.
+/// which path their compositor surfaced. Other platforms keep
+/// `AutoVsync`.
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
 fn preferred_present_mode(
     surface: &wgpu::Surface<'static>,
@@ -539,12 +552,14 @@ fn preferred_present_mode(
         });
         let pick = if let Some(m) = forced.filter(|m| modes.contains(m)) {
             m
-        } else if modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else if modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
+        } else if modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
         } else if modes.contains(&wgpu::PresentMode::FifoRelaxed) {
             wgpu::PresentMode::FifoRelaxed
+        } else if modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
         } else {
             wgpu::PresentMode::AutoVsync
         };
@@ -3399,6 +3414,18 @@ impl WindowedApp {
                                             Some(cap) => refresh.min(cap),
                                             None => refresh,
                                         };
+                                        // Cap the adaptive ladder at the panel
+                                        // refresh so it never climbs past vsync
+                                        // (e.g. 60→90→120 on a 60 Hz NUC panel,
+                                        // which beat-judders the spinner + scroll
+                                        // decel). On Wayland `refresh_rate_*`
+                                        // often reports None → 60, the correct
+                                        // default ceiling.
+                                        if let Some(adapter) = fps_adapter.as_ref() {
+                                            if let Ok(mut a) = adapter.lock() {
+                                                a.set_ceiling(refresh);
+                                            }
+                                        }
                                         if let Ok(mut sched) = animations.lock() {
                                             sched.set_target_fps(effective_fps);
                                             tracing::debug!(
@@ -7151,33 +7178,40 @@ impl WindowedApp {
                                     // since startup). 0 ⇒ no cap → vsync pace.
                                     let live_cap_chain =
                                         animation_fps_cap_atomic.load(Ordering::Relaxed);
-                                    if live_cap_chain > 0 {
-                                        // Cap is set → pace the next Frame at
-                                        // exactly the cap interval. Otherwise
-                                        // (`request_redraw`) winit on macOS
-                                        // would deliver Frames back-to-back at
-                                        // microsecond cadence — Phase 4 would
-                                        // skip them via the cap-elapsed check
-                                        // but the loop still spun 3000+ times
-                                        // per second, pinning CPU at 100 % under
-                                        // continuous click + active animation.
-                                        // `wake_at` routes through the platform
-                                        // shim's timer thread so the next Frame
-                                        // arrives at the exact moment Phase 4
-                                        // is allowed to render. Matches the
-                                        // cap-elapsed check in Phase 4 — both
-                                        // paths converge on the same cadence.
+                                    if live_cap_chain > 0 && !keep_alive {
+                                        // Capped, non-keep-alive (macOS / X11):
+                                        // pace the next Frame at exactly the cap
+                                        // interval. Otherwise (`request_redraw`)
+                                        // winit on macOS would deliver Frames
+                                        // back-to-back at microsecond cadence —
+                                        // Phase 4 would skip them via the cap-
+                                        // elapsed check but the loop still spun
+                                        // 3000+ times per second, pinning CPU at
+                                        // 100 % under continuous click + active
+                                        // animation. `wake_at` routes through the
+                                        // platform shim's timer thread so the next
+                                        // Frame arrives at the exact moment Phase 4
+                                        // is allowed to render.
                                         let delay = std::time::Duration::from_millis(
                                             1000 / live_cap_chain as u64,
                                         );
                                         frame_dirty.store(true, Ordering::Release);
                                         wake_proxy_for_pacing.wake_at(delay);
                                     } else {
-                                        // No cap configured → render at vsync.
-                                        // `request_redraw` here is fine because
-                                        // every Frame results in a render
-                                        // (Phase 4's cap branch is None → always
-                                        // renders), so we never spin.
+                                        // Wayland keep-alive, or no cap → render at
+                                        // vsync via `request_redraw`. Under keep-
+                                        // alive this is ALREADY vsync-paced by the
+                                        // compositor frame callback (same self-drive
+                                        // as after present), so it never spins — and
+                                        // it must NOT be a cap-interval `wake_at`
+                                        // timer: that timer (e.g. 16 ms) beats
+                                        // against the compositor Done cadence
+                                        // (~16.67 ms), delivering scroll-decel and
+                                        // spinner frames on an uneven 2:3 rhythm =
+                                        // the "laggy on Wayland, smooth on Mac"
+                                        // judder. `request_redraw` coalesces with
+                                        // the keep-alive self-drive onto one vsync
+                                        // cadence.
                                         frame_dirty.store(true, Ordering::Release);
                                         window.request_redraw();
                                     }
