@@ -241,7 +241,7 @@ impl Default for RendererConfig {
         Self {
             // Conservative defaults for low memory footprint
             // Buffers are re-created if scenes exceed these limits, so no hard cap
-            max_primitives: 20_000,    // ~400 KB — handles complex UI screens
+            max_primitives: 20_000,   // ~400 KB — handles complex UI screens
             max_glass_primitives: 32, // ~8 KB
             max_glyphs: 4_000,        // ~256 KB — handles full-screen text content
             sample_count: 1,
