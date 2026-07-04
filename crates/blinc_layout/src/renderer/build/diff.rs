@@ -71,6 +71,20 @@ impl RenderTree {
         self.auto_fill_animation_stable_keys();
         self.sweep_stale_handlers();
         self.sweep_stale_css_animations();
+
+        // Apply class-based stylesheet styles to the freshly-built
+        // subtree. `collect_render_props_boxed` above only applies
+        // inline + `#id` styles (it does register the new nodes'
+        // classes, so the class index below finds them), NOT class
+        // rules. Without this, an in-place rebuilt subtree loses every
+        // `.class`-driven property: the accordion trigger that just
+        // toggled dropped its `.cn-accordion-trigger` padding while
+        // untouched siblings kept theirs. Mirrors the other rebuild
+        // paths (`process_pending_subtree_rebuilds_routed`,
+        // `update_subtree_*_from_builder`). `None` router: any `:hover`
+        // /`:active` state styles re-resolve on the next state pass.
+        self.apply_stylesheet_base_styles_for_subtree(parent_id, None);
+        self.apply_stylesheet_layout_overrides_for_subtree(parent_id);
     }
 
     /// Analyze what categories of changes occurred between stored tree and new element

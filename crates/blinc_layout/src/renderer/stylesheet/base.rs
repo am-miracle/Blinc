@@ -530,7 +530,7 @@ impl RenderTree {
     }
 
     /// Collect all node IDs in a subtree (the node itself + all descendants).
-    fn collect_subtree_ids(&self, node_id: LayoutNodeId, out: &mut Vec<LayoutNodeId>) {
+    pub(crate) fn collect_subtree_ids(&self, node_id: LayoutNodeId, out: &mut Vec<LayoutNodeId>) {
         out.push(node_id);
         for child_id in self.layout_tree.children(node_id) {
             self.collect_subtree_ids(child_id, out);

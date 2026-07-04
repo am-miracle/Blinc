@@ -37,6 +37,36 @@ impl RenderTree {
     /// (width, height, padding, margin, gap, flex-direction, alignment, etc.)
     /// from the stylesheet to the corresponding taffy nodes.
     pub fn apply_stylesheet_layout_overrides(&mut self) {
+        self.apply_stylesheet_layout_overrides_filtered(None);
+    }
+
+    /// Subtree-scoped variant of [`Self::apply_stylesheet_layout_overrides`].
+    ///
+    /// The stateful subtree rebuild path re-applies VISUAL base styles via
+    /// `apply_stylesheet_base_styles_for_subtree` but historically skipped
+    /// LAYOUT overrides, so a rebuilt node (fresh `LayoutNodeId`) lost any
+    /// class-driven padding / size / flex: an opened accordion trigger
+    /// collapsed to zero padding, a hovered menubar submenu row shifted.
+    /// Re-applying layout overrides for just the rebuilt subtree restores
+    /// them without a whole-tree pass.
+    pub(crate) fn apply_stylesheet_layout_overrides_for_subtree(
+        &mut self,
+        parent_id: LayoutNodeId,
+    ) {
+        let mut subtree_nodes = Vec::new();
+        self.collect_subtree_ids(parent_id, &mut subtree_nodes);
+        if subtree_nodes.is_empty() {
+            return;
+        }
+        let subtree_set: std::collections::HashSet<LayoutNodeId> =
+            subtree_nodes.into_iter().collect();
+        self.apply_stylesheet_layout_overrides_filtered(Some(&subtree_set));
+    }
+
+    fn apply_stylesheet_layout_overrides_filtered(
+        &mut self,
+        subtree_filter: Option<&std::collections::HashSet<LayoutNodeId>>,
+    ) {
         use crate::element_style::{
             SpacingRect, StyleAlign, StyleDisplay, StyleFlexDirection, StyleJustify, StyleOverflow,
             StylePosition,
@@ -78,7 +108,9 @@ impl RenderTree {
                 if let Some(class_name) = selector.simple_class_name() {
                     if let Some(node_ids) = class_to_nodes.get(class_name) {
                         for &node_id in node_ids {
-                            overrides.push((node_id, style.clone()));
+                            if subtree_filter.is_none_or(|s| s.contains(&node_id)) {
+                                overrides.push((node_id, style.clone()));
+                            }
                         }
                     }
                     continue;
@@ -87,8 +119,10 @@ impl RenderTree {
                 // Slow path: complex selectors need full matching
                 let all_node_ids: Vec<LayoutNodeId> = self.render_nodes.keys().copied().collect();
                 for &node_id in &all_node_ids {
-                    if self
-                        .complex_selector_matches(selector, node_id, &empty_set, &empty_set, None)
+                    if subtree_filter.is_none_or(|s| s.contains(&node_id))
+                        && self.complex_selector_matches(
+                            selector, node_id, &empty_set, &empty_set, None,
+                        )
                     {
                         overrides.push((node_id, style.clone()));
                     }
@@ -101,7 +135,9 @@ impl RenderTree {
         for id in &all_ids {
             if let Some(node_id) = self.element_registry.get(id) {
                 if let Some(style) = stylesheet.get(id) {
-                    if style.has_layout_props() {
+                    if style.has_layout_props()
+                        && subtree_filter.is_none_or(|s| s.contains(&node_id))
+                    {
                         overrides.push((node_id, style.clone()));
                     }
                 }

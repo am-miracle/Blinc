@@ -458,6 +458,11 @@ impl RenderTree {
                 // runs at full tree creation. Without this, new children from
                 // stateful rebuilds lose CSS class styles (border-radius, etc.).
                 self.apply_stylesheet_base_styles_for_subtree(rebuild.parent_id, router);
+                // Class-driven LAYOUT props (padding / size / flex) too —
+                // base styles above only cover visual props, so without
+                // this a rebuilt node loses its class padding (accordion
+                // trigger collapse, menubar submenu-row shift).
+                self.apply_stylesheet_layout_overrides_for_subtree(rebuild.parent_id);
             } else if matches!(rebuild.kind, crate::stateful::RebuildKind::LayoutProps) {
                 // Layout-prop update — patch taffy `Style` + render
                 // props on every existing layout node, then mark the
@@ -589,6 +594,9 @@ impl RenderTree {
         // Re-apply CSS base styles since the full-replace cleared them
         // (mirrors the visual path's final step).
         self.apply_stylesheet_base_styles_for_subtree(parent_id, router);
+        // Layout overrides too — the full replace cleared class-driven
+        // padding / size / flex along with the visual props.
+        self.apply_stylesheet_layout_overrides_for_subtree(parent_id);
     }
 
     /// Update subtree props from a generic ElementBuilder (for recursion)
@@ -656,5 +664,7 @@ impl RenderTree {
 
         // Re-apply CSS base styles since the full replace cleared them
         self.apply_stylesheet_base_styles_for_subtree(parent_id, router);
+        // Layout overrides too — see the sibling full-replace path above.
+        self.apply_stylesheet_layout_overrides_for_subtree(parent_id);
     }
 }
