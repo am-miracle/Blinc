@@ -362,7 +362,7 @@ fn build_toast_content(
     }
 
     if has_accent {
-        toast = toast.border_left(4.0, accent_color);
+        toast = toast.border(1.0, accent_color);
     }
 
     let mut inner = div().w_full().flex_row().items_start().gap_3().p_4();

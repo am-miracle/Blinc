@@ -802,16 +802,16 @@ pub const CN_STYLES: &str = r#"
        motion_exit (slide from the tray corner by default). */
 }
 .cn-toast--success {
-    border-left: 4px solid var(--success);
+    border: 1px solid var(--success);
 }
 .cn-toast--warning {
-    border-left: 4px solid var(--warning);
+    border: 1px solid var(--warning);
 }
 .cn-toast--error {
-    border-left: 4px solid var(--error);
+    border: 1px solid var(--error);
 }
 .cn-toast--info {
-    border-left: 4px solid var(--info);
+    border: 1px solid var(--info);
 }
 
 /* ============================================================================
