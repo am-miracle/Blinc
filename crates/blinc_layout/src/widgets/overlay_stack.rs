@@ -992,41 +992,49 @@ fn position_wrapper(
             // Done / OK / menu items off-screen, making the action
             // unreachable. The user-flagged "useless dialog" case.
             let margin: f32 = 8.0;
-            let (clamped_x, clamped_y) = if let Some((w, h)) = size {
-                let mut cx = *x;
-                let mut cy = *y;
-                // Right edge — shift left so the panel right side
-                // sits at most `viewport.0 - margin`.
-                if cx + w + margin > viewport.0 {
-                    cx = (viewport.0 - w - margin).max(margin);
-                }
-                if cx < margin {
-                    cx = margin;
-                }
-                // Bottom edge — if the panel would clip off the
-                // bottom AND there's room above, flip above. Use
-                // *y as the trigger's natural anchor row; flipping
-                // mirrors the panel above by its own height with a
-                // small gap.
-                if cy + h + margin > viewport.1 {
-                    let flipped = cy - h - 8.0;
-                    if flipped >= margin {
-                        cy = flipped;
+            match size {
+                Some((w, _h)) => {
+                    // Right edge — shift left so the panel right side
+                    // sits at most `viewport.0 - margin`. The width hint
+                    // tracks real width closely, so horizontal overflow is
+                    // a genuine clip worth correcting.
+                    let mut cx = *x;
+                    if cx + w + margin > viewport.0 {
+                        cx = (viewport.0 - w - margin).max(margin);
+                    }
+                    if cx < margin {
+                        cx = margin;
+                    }
+                    // Vertical: the `.size` hint is a worst-case CAP, NOT
+                    // the panel's real content-driven height. The old code
+                    // flipped by that hint (`cy - h`), which hurled a small
+                    // panel far above the trigger once the anchor scrolled
+                    // into the lower viewport — the "dropdown teleports to
+                    // the top" bug. Decide the flip on the anchor's ACTUAL
+                    // remaining space below, and when we do flip, anchor the
+                    // panel by its BOTTOM at the trigger row (grows upward,
+                    // height-independent) so it stays adjacent whatever its
+                    // real height is. Trade-off: a genuinely tall menu with
+                    // only moderate space below may clip a little at the
+                    // bottom rather than flip — far preferable to the
+                    // teleport, and a menu truly at the bottom edge still
+                    // flips so its top rows stay visible.
+                    const MIN_BELOW: f32 = 96.0;
+                    let open_upward =
+                        viewport.1 - *y < MIN_BELOW && *y - margin > MIN_BELOW;
+                    if open_upward {
+                        outer
+                            .left(cx)
+                            .bottom((viewport.1 - *y + margin).max(margin))
+                            .child(child)
                     } else {
-                        // No room above either — pin against the
-                        // bottom edge so the panel is at least
-                        // fully visible.
-                        cy = (viewport.1 - h - margin).max(margin);
+                        outer.left(cx).top((*y).max(margin)).child(child)
                     }
                 }
-                if cy < margin {
-                    cy = margin;
-                }
-                (cx, cy)
-            } else {
-                (*x, *y)
-            };
-            outer.left(clamped_x).top(clamped_y).child(child)
+                // No size hint → caller opted out of clamping; raw
+                // screen-space placement.
+                None => outer.left(*x).top(*y).child(child),
+            }
         }
         OverlayPosition::Corner(c) => {
             // Anchor to a corner with a default 16px inset. Widgets can override.
