@@ -920,8 +920,14 @@ fn build_menubar_menu_div(
                 .class("cn-menubar-item")
                 .w_full()
                 .h_fit()
-                .py(padding / 4.0)
-                .px(padding / 2.0)
+                // Fallback padding MUST equal the `.cn-menubar-item` CSS
+                // (space-2 / space-3 = 8px / 12px). Class layout overrides
+                // can drop on a rebuilt subtree (submenu open re-mints the
+                // hovered row — see project_css_overrides_consistency); if
+                // the fallback differs, that row's text visibly shifts
+                // against its siblings.
+                .py(2.0)
+                .px(3.0)
                 .cursor(cursor);
             if has_submenu {
                 // CSS hook for the panel's `:has()` flicker
