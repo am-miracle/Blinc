@@ -3684,6 +3684,21 @@ impl RenderContext {
                             css_transformed_text_prims.push(prim);
                         }
                     } else {
+                        // Pixel-snap the glyph origin to the physical grid.
+                        // Quad w/h and per-glyph advance/bearing are already
+                        // integers, so the only fractional part is the text
+                        // origin (fractional layout position + the
+                        // (line_height - cap_height)/2 vertical centering).
+                        // Left unsnapped, the Linear glyph-atlas sampler
+                        // smears each glyph across texels — invisible at 2x
+                        // (the error halves and usually lands on integers) but
+                        // visibly soft at 1x on standard-DPI displays. Rounding
+                        // the origin makes every quad span an exact integer
+                        // pixel range so the SDF shader hits texel centers.
+                        for glyph in &mut glyphs {
+                            glyph.bounds[0] = glyph.bounds[0].round();
+                            glyph.bounds[1] = glyph.bounds[1].round();
+                        }
                         all_glyphs.extend(glyphs);
                     }
                 }
@@ -9531,7 +9546,15 @@ impl RenderContext {
                             css_transformed_text_prims.push(prim);
                         }
                     } else {
-                        // Normal text: add to glyph pipeline
+                        // Normal text: pixel-snap the glyph origin to the
+                        // physical grid before the glyph pipeline. See the
+                        // matching snap on the DrawContext path — without it
+                        // the Linear atlas sampler softens every glyph at 1x
+                        // (standard-DPI); crisp and unchanged at 2x.
+                        for glyph in &mut glyphs {
+                            glyph.bounds[0] = glyph.bounds[0].round();
+                            glyph.bounds[1] = glyph.bounds[1].round();
+                        }
                         glyphs_by_layer
                             .entry(text.z_index)
                             .or_default()
