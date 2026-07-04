@@ -35,9 +35,20 @@ use crate::widgets::cursor::{CursorAnimation, SharedCursorState, cursor_state};
 
 /// Get elapsed time in milliseconds since app start (for cursor blinking)
 pub fn elapsed_ms() -> u64 {
+    elapsed_micros() / 1000
+}
+
+/// Get elapsed time in MICROSECONDS since app start.
+///
+/// Shares one monotonic clock with [`elapsed_ms`]. Millisecond
+/// resolution quantises a 16.67 ms vsync interval to alternating 16/17 ms
+/// deltas — a ~6% per-frame jitter that reads as micro-judder in any
+/// dt-integrated animation (scroll momentum, timelines). Consumers that
+/// integrate motion over `dt` should derive it from this instead.
+pub fn elapsed_micros() -> u64 {
     static START_TIME: OnceLock<web_time::Instant> = OnceLock::new();
     let start = START_TIME.get_or_init(web_time::Instant::now);
-    start.elapsed().as_millis() as u64
+    start.elapsed().as_micros() as u64
 }
 
 /// Standard cursor blink interval in milliseconds

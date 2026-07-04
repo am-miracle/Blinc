@@ -1088,13 +1088,20 @@ impl RenderTree {
     /// Call this each frame with the current time in milliseconds.
     /// Uses actual time delta for smooth, frame-rate independent animation.
     pub fn tick_scroll_physics(&mut self, current_time_ms: u64) -> bool {
-        // Calculate actual delta time
-        let dt_secs = if let Some(last_time) = self.last_scroll_tick_ms {
-            (current_time_ms.saturating_sub(last_time)) as f32 / 1000.0
+        // Delta time from a MICROSECOND clock, not the millisecond
+        // `current_time_ms` arg: integer-ms `dt` quantises a 16.67ms
+        // vsync into alternating 16/17ms steps (~6% jitter), which the
+        // momentum-coast integrator turns into visible micro-judder.
+        // Input-driven active scrolling is immune (it doesn't integrate
+        // `dt`), which is why only deceleration looked rough. `current_
+        // time_ms` is still used below for the idle-bounce wall clock.
+        let now_us = crate::widgets::text_input::elapsed_micros();
+        let dt_secs = if let Some(last_us) = self.last_scroll_tick_us {
+            (now_us.saturating_sub(last_us)) as f32 / 1_000_000.0
         } else {
             1.0 / 60.0 // Assume ~60fps for first frame
         };
-        self.last_scroll_tick_ms = Some(current_time_ms);
+        self.last_scroll_tick_us = Some(now_us);
 
         // Clamp dt to prevent huge jumps if app was paused
         let dt_secs = dt_secs.min(0.1);

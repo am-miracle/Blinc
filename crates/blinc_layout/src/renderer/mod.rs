@@ -744,8 +744,9 @@ pub struct RenderTree {
     /// animation source is mid-flight. Avoids flapping on
     /// under-damped spring oscillation around a target.
     settled_streak: RefCell<HashMap<LayoutNodeId, u32>>,
-    /// Last tick time for scroll physics (in milliseconds)
-    last_scroll_tick_ms: Option<u64>,
+    /// Last tick time for scroll physics, in MICROSECONDS — millisecond
+    /// resolution quantises the momentum-coast `dt` into a visible jitter.
+    last_scroll_tick_us: Option<u64>,
     /// DPI scale factor (physical / logical pixels)
     ///
     /// When set, all layout positions and sizes are multiplied by this factor
@@ -967,7 +968,7 @@ impl RenderTree {
                 crate::motion_texture_cache::MotionSubtreeBakeRegistry::empty(),
             ),
             settled_streak: RefCell::new(HashMap::new()),
-            last_scroll_tick_ms: None,
+            last_scroll_tick_us: None,
             scale_factor: 1.0,
             animations: Weak::new(),
             tree_hash: None,
