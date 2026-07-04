@@ -500,14 +500,17 @@ impl WindowState {
 /// Pick the best present mode for the current surface.
 ///
 /// Preference order on Linux:
-/// 1. `Fifo` — strict vsync. Correct present mode: no tearing, energy-
-///    efficient, and its presentation is paced to the display's Done
-///    cadence, which matters most when the "display" is a compositor
-///    SCREEN-CAPTURE (remote desktop / RDP / screen recording): the
-///    capturer samples a vsync-synchronised swapchain cleanly, whereas
-///    an unsynchronised `Immediate` swapchain is captured mid-flip and
-///    reads as judder even though local rendering is fine.
-/// 2. `FifoRelaxed` — vsync that tears only under late frames.
+/// 1. `FifoRelaxed` — vsync-paced, but a frame that lands late tears
+///    instead of blocking. Preferred over strict Fifo: strict Fifo makes
+///    the next present WAIT for the following vsync whenever one frame
+///    runs late, surfacing as an occasional animation hitch/pause;
+///    FifoRelaxed lets that single late frame through (a brief tear) and
+///    keeps the cadence steady. It is still vsync-synchronised in the
+///    steady state, so it reads cleanly under compositor screen-capture
+///    (remote desktop / RDP) — unlike unsynchronised `Immediate`, which
+///    is captured mid-flip and judders even though local rendering is
+///    fine.
+/// 2. `Fifo` — strict vsync (fallback when FifoRelaxed is unavailable).
 /// 3. `Mailbox` — non-blocking with frame replacement.
 /// 4. `Immediate` — non-blocking, may tear. Last resort.
 /// 5. `AutoVsync`.
@@ -552,10 +555,10 @@ fn preferred_present_mode(
         });
         let pick = if let Some(m) = forced.filter(|m| modes.contains(m)) {
             m
-        } else if modes.contains(&wgpu::PresentMode::Fifo) {
-            wgpu::PresentMode::Fifo
         } else if modes.contains(&wgpu::PresentMode::FifoRelaxed) {
             wgpu::PresentMode::FifoRelaxed
+        } else if modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
         } else if modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
         } else if modes.contains(&wgpu::PresentMode::Immediate) {
