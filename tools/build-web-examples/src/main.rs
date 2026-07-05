@@ -215,7 +215,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // Same API behind the `gltf::` / `skeleton::` sub-modules.
         // Features flow through from the example crate's `gltf`
         // feature: platform-assets + bc-encode.
-        r#"{ git = "https://github.com/project-blinc/blinc_game_kit.git", rev = "10a8ced69f1dc5d04f6d729f47c4a7347d96797f", features = ["platform-assets", "bc-encode"] }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_game_kit.git", rev = "2db35f96ec552f39dec85d4f63914dfb70f5aa82", features = ["platform-assets", "bc-encode"] }"#,
     ),
     (
         "blinc_node_editor::",
@@ -224,7 +224,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // repo (`github.com/project-blinc/blinc_node_editor`) and is
         // pinned to the same rev `examples/blinc_app_examples/Cargo.toml`
         // uses. Bump in lockstep.
-        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "34db86571efa998b5f0b60e58f5ed297b3630916" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "abcc7da70011773dd981bb73c82936bcb91a11b3" }"#,
     ),
     (
         "blinc_portal_ui::",
@@ -232,7 +232,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // Immediate-mode widget toolkit pulled by node_editor_demo for
         // its node body closures. Same downstream-repo pattern as
         // canvas_kit / node_editor — pinned to the workspace rev.
-        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "69aaf1b62f66b58c4e92d98f05af9eb0a9d61929" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "41c40a9e3da33148eb789e096debbd8ac9eb56a8" }"#,
     ),
     // `blinc_input` was absorbed into `blinc_canvas_kit::input` and the
     // standalone repo archived. Demos that previously imported
