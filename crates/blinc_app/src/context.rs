@@ -220,12 +220,14 @@ fn effective_single_clip(primary: Option<[f32; 4]>, scroll: Option<[f32; 4]>) ->
 /// the static-cache paint (the walker's `skip_canvas_drawing` flag)
 /// and re-invokes the closure into a scratch
 /// `GpuPaintContext` each frame inside `collect_canvas_overlay`.
-/// A canvas closure can emit three different kinds of draw output,
+/// A canvas closure can emit several different kinds of draw output,
 /// and ALL of them need to reach the GPU for the canvas to render
 /// correctly:
 ///
 /// - **`primitives`** — SDF / glass / text primitives, the
 ///   common case (drawn rounded boxes, gradients, glyphs).
+/// - **`foreground_primitives`** — SDF / mesh / text primitives
+///   emitted while the canvas has `set_foreground_layer(true)` active.
 /// - **`dynamic_images`** — raw-RGBA blits via
 ///   `ctx.draw_rgba_pixels(...)`. Used by video players (one
 ///   blit per video frame) and the camera-preview demos.
@@ -234,13 +236,14 @@ fn effective_single_clip(primary: Option<[f32; 4]>, scroll: Option<[f32; 4]>) ->
 ///   through this path.
 ///
 /// Before this struct existed, the overlay collection only drained
-/// `primitives` from the scratch batch; the other two channels
+/// `primitives` from the scratch batch; the other channels
 /// were dropped on the floor when the scratch context dropped at
-/// end-of-frame, so video frames and 3D content never reached the
-/// GPU under compositor mode.
+/// end-of-frame, so foreground canvas content, video frames, and 3D
+/// content never reached the GPU under compositor mode.
 #[derive(Default)]
 pub struct CanvasOverlay {
     pub primitives: Vec<blinc_gpu::primitives::GpuPrimitive>,
+    pub foreground_primitives: Vec<blinc_gpu::primitives::GpuPrimitive>,
     pub dynamic_images: Vec<blinc_gpu::primitives::DynamicImage>,
     pub meshes: Vec<blinc_gpu::PendingMesh>,
     /// User-defined GPU passes scheduled via `DrawContext::run_gpu_pass`
@@ -1195,6 +1198,8 @@ impl RenderContext {
     /// every kind of draw output the closure produced:
     ///
     /// - `primitives`: SDF / mesh / text primitives (the main batch)
+    /// - `foreground_primitives`: SDF / mesh / text primitives emitted
+    ///   while `set_foreground_layer(true)` is active
     /// - `dynamic_images`: raw-RGBA blits like video frames
     ///   (`ctx.draw_rgba_pixels(...)`)
     /// - `meshes`: 3D mesh draws (`ctx.draw_mesh_data(...)`) from
@@ -1359,15 +1364,17 @@ impl RenderContext {
                 scratch.pop_clip();
             }
 
-            // Drain everything the closure emitted: SDF/text
-            // primitives go to `overlay.primitives`, raw-RGBA
-            // blits (video frames, camera previews) go to
+            // Drain everything the closure emitted: normal SDF/text/mesh
+            // primitives go to `overlay.primitives`, foreground
+            // SDF/text/mesh primitives go to
+            // `overlay.foreground_primitives`, raw-RGBA blits (video
+            // frames, camera previews) go to
             // `overlay.dynamic_images`, and 3D mesh draws go to
-            // `overlay.meshes`. Without draining all three, the
-            // compositor-mode overlay path drops video / mesh /
-            // image content while the non-compositor path renders
-            // them correctly — the canonical "video doesn't
-            // render" / "3D helmet missing" bugs.
+            // `overlay.meshes`. Without draining all of these, the
+            // compositor-mode overlay path drops foreground / video /
+            // mesh / image content while the non-compositor path renders
+            // them correctly — the canonical "minimap missing" /
+            // "video doesn't render" / "3D helmet missing" bugs.
             let mut new_batch = scratch.take_batch();
 
             // Shift per-primitive aux_data offsets by the amount
@@ -1404,10 +1411,15 @@ impl RenderContext {
             //     any canvas closure that pushes a polygon clip
             //     (e.g. cn::spinner arcs once those were canvas-
             //     hosted) — same garbage-read failure mode.
-            Self::shift_aux_offsets(&mut new_batch.primitives, overlay.aux_data.len() as f32);
+            let aux_shift = overlay.aux_data.len() as f32;
+            Self::shift_aux_offsets(&mut new_batch.primitives, aux_shift);
+            Self::shift_aux_offsets(&mut new_batch.foreground_primitives, aux_shift);
 
             overlay.aux_data.extend(new_batch.aux_data);
             overlay.primitives.extend(new_batch.primitives);
+            overlay
+                .foreground_primitives
+                .extend(new_batch.foreground_primitives);
             overlay.dynamic_images.extend(new_batch.dynamic_images);
             overlay.meshes.extend(scratch.take_pending_meshes());
             overlay.gpu_passes.extend(scratch.take_pending_gpu_passes());
@@ -2842,9 +2854,15 @@ impl RenderContext {
         }
     }
 
-    /// Re-dispatch `RenderLayer::Foreground` primitives on top of the
-    /// canvas overlay so host overlays (zoom HUD, minimap, toolbar,
-    /// etc.) stay visible above canvas-drawn content.
+    /// Re-dispatch foreground primitives on top of the canvas overlay.
+    /// Host foreground chrome (zoom HUD, toolbar, etc.) stays visible
+    /// above normal canvas-drawn content, then canvas-emitted foreground
+    /// primitives (minimap chrome and other explicit foreground canvas
+    /// output) land above the cached foreground.
+    ///
+    /// Global overlay surfaces (OverlayStack / ToastTray) are dispatched
+    /// after this helper at the compositor call sites so popovers and
+    /// toasts still sit above canvas foreground chrome.
     ///
     /// Background:
     /// * The slow paint walker's Pass 4 bakes foreground primitives
@@ -2859,15 +2877,22 @@ impl RenderContext {
     ///   re-paints canvas on top of the cached fg pixels.
     ///
     /// Re-dispatching the cached foreground primitives after the
-    /// canvas overlay restores the intended z-order:
-    /// `cache (bg + glass + fg) → canvas overlay → fg overlay`.
+    /// canvas overlay restores the intended z-order, and dispatching
+    /// canvas foreground after that preserves explicit
+    /// `set_foreground_layer(true)` output from canvas closures:
+    /// `cache (bg + glass + fg) → canvas overlay → fg overlay →
+    /// canvas fg overlay → global overlays`.
     /// The double-paint of fg pixels (once from cache, once from
     /// this dispatch) is identical for opaque content.
     /// Semi-transparent fg over a canvas will blend twice
     /// (acceptable for most overlay use; revisit if a
     /// pixel-perfect single-blend variant is needed).
     ///
-    fn render_foreground_overlay(&mut self, target_view: &wgpu::TextureView) {
+    fn render_foreground_overlay(
+        &mut self,
+        target_view: &wgpu::TextureView,
+        canvas_overlays: &[&CanvasOverlay],
+    ) {
         let fg_prims = self
             .cached_bg_batch
             .as_ref()
@@ -2878,7 +2903,10 @@ impl RenderContext {
             .as_ref()
             .filter(|v| !v.is_empty())
             .cloned();
-        if fg_prims.is_none() && fg_glyphs.is_none() {
+        let has_canvas_fg = canvas_overlays
+            .iter()
+            .any(|overlay| !overlay.foreground_primitives.is_empty());
+        if fg_prims.is_none() && fg_glyphs.is_none() && !has_canvas_fg {
             return;
         }
         self.rebind_glyph_atlas_for_overlay();
@@ -2912,6 +2940,22 @@ impl RenderContext {
         // appears muffled or hidden under canvas-drawn content.
         if let Some(glyphs) = fg_glyphs {
             self.render_text(target_view, &glyphs);
+        }
+        for canvas_overlay in canvas_overlays {
+            if canvas_overlay.foreground_primitives.is_empty() {
+                continue;
+            }
+            // Prior foreground/text dispatches may have restored static
+            // aux_data. Canvas foreground primitives were emitted against
+            // the overlay's merged aux buffer, so re-upload it before this
+            // final foreground pass.
+            if !canvas_overlay.aux_data.is_empty() {
+                self.renderer
+                    .update_aux_data_slice(&canvas_overlay.aux_data);
+            }
+            self.rebind_glyph_atlas_for_overlay();
+            self.renderer
+                .render_primitives_overlay(target_view, &canvas_overlay.foreground_primitives);
         }
     }
 
@@ -2972,23 +3016,33 @@ impl RenderContext {
     /// dispatch left its own aux_data on the GPU, so we must re-upload
     /// this pool's aux_data before submitting its draw or every
     /// mesh / 3D-group / polygon-clip primitive in here would sample
-    /// stale floats. The dynamic_images / meshes / gpu_passes channels
-    /// stay with the main canvas overlay (their dispatch paths live
-    /// just after this in the call sites).
+    /// stale floats. Foreground primitives in this pool are dispatched
+    /// here too, rather than in `render_foreground_overlay`, because
+    /// overlay-subtree canvases need to sit above their own overlay
+    /// panel while main canvas foreground must stay below global
+    /// OverlayStack / ToastTray surfaces. The dynamic_images / meshes /
+    /// gpu_passes channels stay with the main canvas overlay (their
+    /// dispatch paths live just after this in the call sites).
     fn dispatch_overlay_canvas_overlay(
         &mut self,
         target_view: &wgpu::TextureView,
         overlay: &CanvasOverlay,
     ) {
-        if overlay.primitives.is_empty() {
+        if overlay.primitives.is_empty() && overlay.foreground_primitives.is_empty() {
             return;
         }
         if !overlay.aux_data.is_empty() {
             self.renderer.update_aux_data_slice(&overlay.aux_data);
         }
         self.rebind_glyph_atlas_for_overlay();
-        self.renderer
-            .render_primitives_overlay(target_view, &overlay.primitives);
+        if !overlay.primitives.is_empty() {
+            self.renderer
+                .render_primitives_overlay(target_view, &overlay.primitives);
+        }
+        if !overlay.foreground_primitives.is_empty() {
+            self.renderer
+                .render_primitives_overlay(target_view, &overlay.foreground_primitives);
+        }
     }
 
     /// Shift every `aux_data` index on `prims` by `shift`.
@@ -8103,18 +8157,13 @@ impl RenderContext {
                     &overlay.primitives,
                     &overlay.aux_data,
                 );
-                self.dispatch_dynamic_batch_overlay(target_view);
-                // Overlay-subtree canvases (e.g. caret blink inside a
-                // focused cn::input) dispatch HERE so they land above
-                // the dyn-batch SDF the popover just painted.
-                self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
                 // Canvas-emitted dynamic images (portal_ui noise /
                 // texture nodes via draw_rgba_pixels). Dispatched in the
-                // canvas/overlay band — BEFORE the foreground overlay —
+                // canvas band — BEFORE the foreground overlay —
                 // so a node's RGBA content sits with the rest of the
-                // canvas content and UNDER foreground chrome (search
-                // bar, host `RenderLayer::Foreground` overlays). Each
-                // image is scissored to its node body by the clip
+                // canvas content and UNDER foreground chrome (minimap,
+                // search bar, host `RenderLayer::Foreground` overlays).
+                // Each image is scissored to its node body by the clip
                 // captured at emit time (see `render_dynamic_images`).
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
@@ -8123,8 +8172,14 @@ impl RenderContext {
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
-                // content. See `render_foreground_overlay` doc.
-                self.render_foreground_overlay(target_view);
+                // content, while still staying below global overlay
+                // surfaces. See `render_foreground_overlay` doc.
+                self.render_foreground_overlay(target_view, &[&overlay]);
+                self.dispatch_dynamic_batch_overlay(target_view);
+                // Overlay-subtree canvases (e.g. caret blink inside a
+                // focused cn::input) dispatch HERE so they land above
+                // the dyn-batch SDF the popover just painted.
+                self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
                 // Composited CSS layers — blit each promoted subtree's
                 // texture with the current animation transform. MUST
                 // run BEFORE the motion-subtree text / SVG overlays
@@ -8477,8 +8532,6 @@ impl RenderContext {
                     &overlay.primitives,
                     &overlay.aux_data,
                 );
-                self.dispatch_dynamic_batch_overlay(target_view);
-                self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
                 // Canvas-emitted dynamic images (noise / texture nodes)
                 // dispatched in the canvas band — before the foreground
                 // overlay — and scissored to their node body. See the
@@ -8490,8 +8543,11 @@ impl RenderContext {
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
-                // content. See `render_foreground_overlay` doc.
-                self.render_foreground_overlay(target_view);
+                // content, while still staying below global overlay
+                // surfaces. See `render_foreground_overlay` doc.
+                self.render_foreground_overlay(target_view, &[&overlay]);
+                self.dispatch_dynamic_batch_overlay(target_view);
+                self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
                 // Composited CSS layers — blit each promoted subtree's
                 // texture with the current animation transform. MUST
                 // run BEFORE the motion-subtree text / SVG overlays
@@ -8751,8 +8807,6 @@ impl RenderContext {
             &overlay.primitives,
             &overlay.aux_data,
         );
-        self.dispatch_dynamic_batch_overlay(target_view);
-        self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
         // Canvas-emitted dynamic images (noise / texture nodes)
         // dispatched in the canvas band — before the foreground overlay
         // — and scissored to their node body. See the longer note at
@@ -8764,8 +8818,12 @@ impl RenderContext {
         // Foreground overlay — re-dispatch fg primitives on top of
         // the canvas overlay so host overlays marked
         // `RenderLayer::Foreground` win z-order over canvas content.
-        // See `render_foreground_overlay` doc.
-        self.render_foreground_overlay(target_view);
+        // Global overlay surfaces still dispatch after this pass so
+        // popovers and toasts sit above canvas foreground chrome. See
+        // `render_foreground_overlay` doc.
+        self.render_foreground_overlay(target_view, &[&overlay]);
+        self.dispatch_dynamic_batch_overlay(target_view);
+        self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
         // Motion-subtree text overlay — same rationale as the fast
         // paths: motion-bound bg primitives paint on top of the static
         // cache via `composite_frame`'s overlay, so the text inside

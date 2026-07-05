@@ -6800,8 +6800,13 @@ impl WindowedApp {
                             // so they share the same event routing and incremental update path.
                             // =========================================================
 
-                            // Clear dirty flags for overlays (they've been processed in tree build)
-                            let _content_dirty = windowed_ctx.overlay_manager.take_dirty();
+                            // Animation dirtiness is render-only and can be consumed after paint.
+                            // Structural dirty flags must be preserved for the pre-render subtree
+                            // rebuild phase: canvas-hosted immediate-mode widgets can call
+                            // `.show()` while `render_tree_with_motion_opt` is painting, after the
+                            // rebuild phase has already run for this frame. Clearing content dirty
+                            // here would strand that new overlay in its manager without ever
+                            // mounting it into the render tree.
                             let _animation_dirty = windowed_ctx.overlay_manager.take_animation_dirty();
 
                             // Track overlay visibility for triggering rebuilds
@@ -6959,7 +6964,9 @@ impl WindowedApp {
                             // motion) flow through their own signals below.
                             let needs_overlay_redraw = {
                                 let mgr = windowed_ctx.overlay_manager.lock().unwrap();
-                                mgr.take_dirty() || mgr.has_animating_overlays()
+                                mgr.is_dirty()
+                                    || mgr.take_animation_dirty()
+                                    || mgr.has_animating_overlays()
                             };
                             // Phase 3 transition: same gate for the new stack +
                             // tray. Either dirtying source schedules the next paint.
@@ -6968,14 +6975,14 @@ impl WindowedApp {
                                 let s_signal = overlay_stack()
                                     .lock()
                                     .map(|s| {
-                                        s.take_dirty()
+                                        s.is_dirty()
                                             || s.take_animation_dirty()
                                             || s.has_animating_overlays()
                                     })
                                     .unwrap_or(false);
                                 let t_signal = toast_tray()
                                     .lock()
-                                    .map(|t| t.take_dirty() || t.has_animating())
+                                    .map(|t| t.is_dirty() || t.has_animating())
                                     .unwrap_or(false);
                                 s_signal || t_signal
                             };
