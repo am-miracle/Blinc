@@ -4434,6 +4434,24 @@ impl GpuRenderer {
             .map_err(RendererError::SurfaceError)
     }
 
+    /// Create a surface from platform raw handles using the renderer's
+    /// existing instance.
+    ///
+    /// This is used by platforms such as Android where the OS can destroy
+    /// and recreate the native window while the GPU device and render tree
+    /// should remain alive.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold [`wgpu::Instance::create_surface_unsafe`]'s
+    /// handle validity and lifetime requirements.
+    pub unsafe fn create_surface_unsafe(
+        &self,
+        target: wgpu::SurfaceTargetUnsafe,
+    ) -> Result<wgpu::Surface<'static>, RendererError> {
+        unsafe { self.instance.create_surface_unsafe(target) }.map_err(RendererError::SurfaceError)
+    }
+
     /// The adapter the device/queue were created against. Needed for
     /// `Surface::get_capabilities` so callers can negotiate format /
     /// alpha mode / present mode against what the OS compositor

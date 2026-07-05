@@ -691,6 +691,22 @@ impl BlincApp {
         self.ctx.create_surface(window)
     }
 
+    /// Create a new wgpu surface from platform raw handles.
+    ///
+    /// Android uses this to attach a freshly-created `ANativeWindow` to the
+    /// existing renderer/device after the app returns from the background.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold [`wgpu::Instance::create_surface_unsafe`]'s
+    /// handle validity and lifetime requirements.
+    pub unsafe fn create_surface_unsafe(
+        &self,
+        target: wgpu::SurfaceTargetUnsafe,
+    ) -> std::result::Result<wgpu::Surface<'static>, blinc_gpu::RendererError> {
+        unsafe { self.ctx.create_surface_unsafe(target) }
+    }
+
     /// Get the texture format used by the renderer's pipelines
     ///
     /// This should match the format used for the surface configuration

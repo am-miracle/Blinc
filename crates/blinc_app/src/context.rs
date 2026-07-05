@@ -7450,6 +7450,22 @@ impl RenderContext {
         self.renderer.create_surface(window)
     }
 
+    /// Create a new wgpu surface from platform raw handles.
+    ///
+    /// Android uses this when `ANativeWindow` is recreated while the
+    /// renderer/device should be preserved.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold [`wgpu::Instance::create_surface_unsafe`]'s
+    /// handle validity and lifetime requirements.
+    pub unsafe fn create_surface_unsafe(
+        &self,
+        target: wgpu::SurfaceTargetUnsafe,
+    ) -> std::result::Result<wgpu::Surface<'static>, blinc_gpu::RendererError> {
+        unsafe { self.renderer.create_surface_unsafe(target) }
+    }
+
     /// Render a layout tree with dynamic render state overlays
     ///
     /// This method renders:

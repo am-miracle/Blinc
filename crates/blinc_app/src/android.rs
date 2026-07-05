@@ -104,6 +104,16 @@ use crate::windowed::{
     SharedReadyCallbacks, WindowedContext,
 };
 
+struct AndroidSurfaceState {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    width: u32,
+    height: u32,
+    logical_width: f32,
+    logical_height: f32,
+    scale_factor: f64,
+}
+
 /// Android application runner
 ///
 /// Provides a simple way to run a Blinc application on Android
@@ -151,6 +161,141 @@ impl AndroidApp {
         let subscriber =
             tracing_subscriber::registry().with(tracing_android::layer("Blinc").unwrap());
         let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+
+    fn force_opaque_window_format(window: &NativeWindow) {
+        // Force the underlying ANativeWindow to use an opaque (no-alpha)
+        // pixel format BEFORE we create the wgpu/Vulkan swapchain on it.
+        //
+        // Why: NativeActivity windows default to a TRANSLUCENT pixel
+        // format on modern Android, which makes SurfaceFlinger composite
+        // our framebuffer using its alpha channel. On the Pixel 10 Pro /
+        // Tensor G5 PowerVR Vulkan driver this combines with `Inherit`
+        // composite alpha to produce a fully invisible window even though
+        // wgpu is rendering opaque content. `R8G8B8X8_UNORM` (the modern
+        // alias of the legacy `WINDOW_FORMAT_RGBX_8888`) tells the
+        // compositor "this surface has no alpha — treat every pixel as
+        // opaque". The Java-side `window.setFormat(PixelFormat.OPAQUE)`
+        // we set in MainActivity is silently overridden once the
+        // NativeActivity's native window comes up, so this NDK-side call
+        // (which lives in the same process and runs after InitWindow) is
+        // the authoritative one. Calling it on a window that's already
+        // RGBA8888 is harmless on devices where the bug doesn't apply.
+        if let Err(e) = window.set_buffers_geometry(
+            0,
+            0,
+            Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8X8_UNORM),
+        ) {
+            tracing::warn!(
+                "ANativeWindow_setBuffersGeometry(R8G8B8X8_UNORM) failed: {} \
+                — surface may composite with alpha and appear blank on PowerVR-class GPUs",
+                e
+            );
+        } else {
+            tracing::info!("ANativeWindow buffer format forced to R8G8B8X8_UNORM (opaque)");
+        }
+    }
+
+    fn surface_target_from_native_window(
+        window: &NativeWindow,
+    ) -> Result<wgpu::SurfaceTargetUnsafe> {
+        use raw_window_handle::{
+            AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle,
+        };
+        use std::ptr::NonNull;
+
+        let raw_window = NonNull::new(window.ptr().as_ptr() as *mut std::ffi::c_void)
+            .ok_or_else(|| BlincError::GpuInit("Invalid native window pointer".to_string()))?;
+
+        let window_handle = AndroidNdkWindowHandle::new(raw_window);
+        let display_handle = AndroidDisplayHandle::new();
+
+        Ok(wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: RawDisplayHandle::Android(display_handle),
+            raw_window_handle: RawWindowHandle::AndroidNdk(window_handle),
+        })
+    }
+
+    fn android_surface_config(
+        app_instance: &BlincApp,
+        width: u32,
+        height: u32,
+    ) -> wgpu::SurfaceConfiguration {
+        // Use `Inherit` rather than `Auto`.
+        //
+        // The Pixel 10 Pro / Tensor G5 PowerVR Vulkan driver
+        // (25.1@6794074) ONLY reports `[Inherit]` as a supported
+        // composite alpha mode — `Opaque` is rejected at
+        // `Surface::configure` with a validation error. `Auto` also
+        // resolves to `Inherit` here, but goes through a code path that
+        // produced a blank/black surface. Forcing `Inherit` explicitly
+        // works around it. Per the Vulkan spec
+        // (VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR), the application is
+        // responsible for configuring the host window's alpha treatment;
+        // `force_opaque_window_format` handles that NDK-side.
+        let format = app_instance.texture_format();
+        let alpha_mode = wgpu::CompositeAlphaMode::Inherit;
+        tracing::info!(
+            "Android surface: format={:?}, alpha_mode={:?}, size={}x{}",
+            format,
+            alpha_mode,
+            width,
+            height,
+        );
+
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        }
+    }
+
+    fn create_surface_for_native_window(
+        app_instance: &BlincApp,
+        window: &NativeWindow,
+    ) -> Result<wgpu::Surface<'static>> {
+        Self::force_opaque_window_format(window);
+        let surface_target = Self::surface_target_from_native_window(window)?;
+        unsafe { app_instance.create_surface_unsafe(surface_target) }
+            .map_err(|e| BlincError::GpuInit(e.to_string()))
+    }
+
+    fn attach_native_window(
+        app_instance: &BlincApp,
+        app: &NdkAndroidApp,
+        window: &NativeWindow,
+    ) -> Result<AndroidSurfaceState> {
+        let width = window.width() as u32;
+        let height = window.height() as u32;
+        if width == 0 || height == 0 {
+            return Err(BlincError::GpuInit(format!(
+                "Invalid native window size: {}x{}",
+                width, height
+            )));
+        }
+
+        let surface = Self::create_surface_for_native_window(app_instance, window)?;
+        let config = Self::android_surface_config(app_instance, width, height);
+        surface.configure(app_instance.device(), &config);
+
+        let scale_factor = blinc_platform_android::get_display_density(app);
+        let logical_width = width as f32 / scale_factor as f32;
+        let logical_height = height as f32 / scale_factor as f32;
+
+        Ok(AndroidSurfaceState {
+            surface,
+            config,
+            width,
+            height,
+            logical_width,
+            logical_height,
+            scale_factor,
+        })
     }
 
     /// Run an Android Blinc application
@@ -341,6 +486,7 @@ impl AndroidApp {
             } else {
                 Some(std::time::Duration::from_millis(100)) // Idle - save power
             };
+            let mut needs_redraw = needs_redraw_next_frame;
             needs_redraw_next_frame = false;
 
             app.poll_events(poll_timeout, |event| {
@@ -349,114 +495,111 @@ impl AndroidApp {
                         MainEvent::InitWindow { .. } => {
                             tracing::info!("Native window initialized");
                             if let Some(window) = app.native_window() {
-                                let width = window.width() as u32;
-                                let height = window.height() as u32;
-                                tracing::info!("Window size: {}x{}", width, height);
+                                let initializing_gpu = blinc_app.is_none();
 
-                                // Initialize GPU with native window
-                                match Self::init_gpu(&window) {
-                                    Ok((app_instance, surf)) => {
-                                        let format = app_instance.texture_format();
-                                        // Use `Inherit` rather than `Auto`.
-                                        //
-                                        // The Pixel 10 Pro / Tensor G5
-                                        // PowerVR Vulkan driver
-                                        // (25.1@6794074) ONLY reports
-                                        // `[Inherit]` as a supported
-                                        // composite alpha mode — `Opaque`
-                                        // is rejected at `Surface::configure`
-                                        // with a validation error. `Auto`
-                                        // also resolves to `Inherit` here,
-                                        // but goes through a code path that
-                                        // produced a blank/black surface.
-                                        // Forcing `Inherit` explicitly works
-                                        // around it. Per the Vulkan spec
-                                        // (VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR),
-                                        // the application is responsible for
-                                        // configuring the host window's
-                                        // alpha treatment — we do that on
-                                        // the Java side by setting
-                                        // `window.setFormat(PixelFormat.OPAQUE)`
-                                        // in `MainActivity.onCreate` so the
-                                        // SurfaceFlinger composes our
-                                        // framebuffer as fully opaque.
-                                        let alpha_mode = wgpu::CompositeAlphaMode::Inherit;
-                                        tracing::info!(
-                                            "Android surface: format={:?}, alpha_mode={:?}, size={}x{}",
-                                            format,
-                                            alpha_mode,
-                                            width,
-                                            height,
-                                        );
-
-                                        let config = wgpu::SurfaceConfiguration {
-                                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                                            format,
-                                            width,
-                                            height,
-                                            present_mode: wgpu::PresentMode::AutoVsync,
-                                            alpha_mode,
-                                            view_formats: vec![],
-                                            desired_maximum_frame_latency: 2,
-                                        };
-                                        surf.configure(app_instance.device(), &config);
-
-                                        // Update text measurer
-                                        crate::text_measurer::init_text_measurer_with_registry(
-                                            app_instance.font_registry(),
-                                        );
-
-                                        surface = Some(surf);
-                                        surface_config = Some(config);
-                                        blinc_app = Some(app_instance);
-                                        native_window = Some(window);
-
-                                        // Create WindowedContext with actual display density
-                                        let scale_factor =
-                                            blinc_platform_android::get_display_density(&app);
-                                        let logical_width = width as f32 / scale_factor as f32;
-                                        let logical_height = height as f32 / scale_factor as f32;
-
-                                        // Initial safe_area = zeros; Kotlin's
-                                        // setOnApplyWindowInsetsListener will push
-                                        // the real values within the first vsync
-                                        // via `nativeDispatchSafeArea`, and the
-                                        // poll loop below copies them into the
-                                        // context on the next tick.
-                                        ctx = Some(WindowedContext::new_android(
-                                            logical_width,
-                                            logical_height,
-                                            scale_factor,
-                                            width as f32,
-                                            height as f32,
-                                            focused,
-                                            (0.0, 0.0, 0.0, 0.0),
-                                            Arc::clone(&animations),
-                                            Arc::clone(&ref_dirty_flag),
-                                            Arc::clone(&reactive),
-                                            Arc::clone(&hooks),
-                                            Arc::clone(&overlays),
-                                            Arc::clone(&element_registry),
-                                            Arc::clone(&ready_callbacks),
-                                        ));
-
-                                        // Set viewport size
-                                        BlincContextState::get()
-                                            .set_viewport_size(logical_width, logical_height);
-
-                                        // Initialize render state
-                                        let mut rs =
-                                            blinc_layout::RenderState::new(Arc::clone(&animations));
-                                        rs.set_shared_motion_states(Arc::clone(
-                                            &shared_motion_states,
-                                        ));
-                                        render_state = Some(rs);
-
-                                        needs_rebuild = true;
-                                        tracing::info!("GPU initialized successfully");
+                                if initializing_gpu {
+                                    match Self::init_gpu(&window) {
+                                        Ok(app_instance) => {
+                                            crate::text_measurer::init_text_measurer_with_registry(
+                                                app_instance.font_registry(),
+                                            );
+                                            blinc_app = Some(app_instance);
+                                            tracing::info!("GPU initialized successfully");
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Failed to initialize GPU: {}", e);
+                                            return;
+                                        }
                                     }
-                                    Err(e) => {
-                                        tracing::error!("Failed to initialize GPU: {}", e);
+                                }
+
+                                if let Some(ref app_instance) = blinc_app {
+                                    match Self::attach_native_window(app_instance, &app, &window) {
+                                        Ok(surface_state) => {
+                                            let AndroidSurfaceState {
+                                                surface: new_surface,
+                                                config: new_config,
+                                                width,
+                                                height,
+                                                logical_width,
+                                                logical_height,
+                                                scale_factor,
+                                            } = surface_state;
+
+                                            surface = Some(new_surface);
+                                            surface_config = Some(new_config);
+                                            native_window = Some(window);
+
+                                            if let Some(ref mut windowed_ctx) = ctx {
+                                                let viewport_changed = (windowed_ctx.width
+                                                    - logical_width)
+                                                    .abs()
+                                                    >= 0.5
+                                                    || (windowed_ctx.height - logical_height).abs()
+                                                        >= 0.5
+                                                    || (windowed_ctx.scale_factor - scale_factor)
+                                                        .abs()
+                                                        >= 0.001;
+                                                windowed_ctx.width = logical_width;
+                                                windowed_ctx.height = logical_height;
+                                                windowed_ctx.scale_factor = scale_factor;
+                                                windowed_ctx.physical_width = width as f32;
+                                                windowed_ctx.physical_height = height as f32;
+                                                windowed_ctx.focused = focused;
+
+                                                if let Some(ref mut tree) = render_tree {
+                                                    tree.set_scale_factor(scale_factor as f32);
+                                                }
+                                                needs_rebuild |= viewport_changed;
+                                            } else {
+                                                // Initial safe_area = zeros; Kotlin's
+                                                // setOnApplyWindowInsetsListener will push
+                                                // the real values within the first vsync
+                                                // via `nativeDispatchSafeArea`, and the
+                                                // poll loop below copies them into the
+                                                // context on the next tick.
+                                                ctx = Some(WindowedContext::new_android(
+                                                    logical_width,
+                                                    logical_height,
+                                                    scale_factor,
+                                                    width as f32,
+                                                    height as f32,
+                                                    focused,
+                                                    (0.0, 0.0, 0.0, 0.0),
+                                                    Arc::clone(&animations),
+                                                    Arc::clone(&ref_dirty_flag),
+                                                    Arc::clone(&reactive),
+                                                    Arc::clone(&hooks),
+                                                    Arc::clone(&overlays),
+                                                    Arc::clone(&element_registry),
+                                                    Arc::clone(&ready_callbacks),
+                                                ));
+                                                needs_rebuild = true;
+                                            }
+
+                                            BlincContextState::get()
+                                                .set_viewport_size(logical_width, logical_height);
+
+                                            if render_state.is_none() {
+                                                let mut rs = blinc_layout::RenderState::new(
+                                                    Arc::clone(&animations),
+                                                );
+                                                rs.set_shared_motion_states(Arc::clone(
+                                                    &shared_motion_states,
+                                                ));
+                                                render_state = Some(rs);
+                                                needs_rebuild = true;
+                                            }
+
+                                            needs_rebuild |= render_tree.is_none();
+                                            needs_redraw_next_frame = true;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to attach native window surface: {}",
+                                                e
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -464,13 +607,24 @@ impl AndroidApp {
 
                         MainEvent::TerminateWindow { .. } => {
                             tracing::info!("Native window terminated");
+                            // Android destroys only the ANativeWindow here.
+                            // Keep the renderer, UI context, render tree, and
+                            // motion state alive so returning from the
+                            // background only recreates the surface.
+                            focused = false;
+                            if let Some(ref mut windowed_ctx) = ctx {
+                                windowed_ctx.focused = false;
+                                windowed_ctx.pointer_query.set_pressure(0.0);
+                                windowed_ctx.pointer_query.set_touch_count(0);
+                            }
+                            blinc_layout::widgets::text_input::cancel_long_press_timer();
+                            pinch_state.reset();
+                            last_touch_x = None;
+                            last_touch_y = None;
+                            is_scrolling = false;
                             native_window = None;
                             surface = None;
                             surface_config = None;
-                            blinc_app = None;
-                            ctx = None;
-                            render_tree = None;
-                            render_state = None;
                         }
 
                         MainEvent::WindowResized { .. } => {
@@ -479,11 +633,8 @@ impl AndroidApp {
                                 let height = window.height() as u32;
                                 tracing::info!("Window resized: {}x{}", width, height);
 
-                                if let (
-                                    Some(ref app_instance),
-                                    Some(ref surf),
-                                    Some(ref mut config),
-                                ) = (&blinc_app, &surface, &mut surface_config)
+                                if let (Some(app_instance), Some(surf), Some(config)) =
+                                    (&blinc_app, &surface, &mut surface_config)
                                 {
                                     if width > 0 && height > 0 {
                                         config.width = width;
@@ -514,6 +665,7 @@ impl AndroidApp {
                             if let Some(ref mut windowed_ctx) = ctx {
                                 windowed_ctx.focused = true;
                             }
+                            needs_redraw_next_frame = true;
                         }
 
                         MainEvent::LostFocus => {
@@ -527,11 +679,18 @@ impl AndroidApp {
                         MainEvent::Resume { .. } => {
                             tracing::info!("App resumed");
                             focused = true;
+                            if let Some(ref mut windowed_ctx) = ctx {
+                                windowed_ctx.focused = true;
+                            }
+                            needs_redraw_next_frame = true;
                         }
 
                         MainEvent::Pause => {
                             tracing::info!("App paused");
                             focused = false;
+                            if let Some(ref mut windowed_ctx) = ctx {
+                                windowed_ctx.focused = false;
+                            }
                         }
 
                         MainEvent::Destroy => {
@@ -572,7 +731,7 @@ impl AndroidApp {
             // Track if touch ended (for scroll physics)
             let mut touch_ended = false;
 
-            if let (Some(ref mut windowed_ctx), Some(ref mut tree)) = (&mut ctx, &mut render_tree) {
+            if let (Some(windowed_ctx), Some(tree)) = (&mut ctx, &mut render_tree) {
                 // Get the scale factor for coordinate conversion
                 let scale = windowed_ctx.scale_factor as f32;
                 let router = &mut windowed_ctx.event_router;
@@ -948,7 +1107,7 @@ impl AndroidApp {
             // remain correct even when the event has bubbled to an
             // ancestor whose bounds differ from the original hit target.
             if !pending_events.is_empty() {
-                if let (Some(ref mut tree), Some(ref windowed_ctx)) = (&mut render_tree, &ctx) {
+                if let (Some(tree), Some(windowed_ctx)) = (&mut render_tree, &ctx) {
                     let router = &windowed_ctx.event_router;
                     for event in pending_events {
                         let (bounds_x, bounds_y, bounds_width, bounds_height) = router
@@ -992,9 +1151,7 @@ impl AndroidApp {
             // NOTE: Do NOT set needs_rebuild here - that triggers full UI rebuild!
             // Scroll just updates internal offset and needs redraw, not rebuild.
             if let Some((mouse_x, mouse_y, delta_x, delta_y)) = scroll_info {
-                if let (Some(ref mut windowed_ctx), Some(ref mut tree)) =
-                    (&mut ctx, &mut render_tree)
-                {
+                if let (Some(windowed_ctx), Some(tree)) = (&mut ctx, &mut render_tree) {
                     let router = &mut windowed_ctx.event_router;
                     // Hit test to get node chain for nested scroll dispatch
                     if let Some(hit) = router.hit_test(tree, mouse_x, mouse_y) {
@@ -1281,8 +1438,6 @@ impl AndroidApp {
             // PHASE 1: Check for incremental updates (prop changes, subtree rebuilds)
             // This avoids full rebuild for simple state changes
             // =========================================================
-            let mut needs_redraw = false;
-
             // Check if stateful elements requested a redraw (hover/press/state changes)
             let has_stateful_updates = blinc_layout::take_needs_redraw();
             let has_pending_rebuilds = blinc_layout::has_pending_subtree_rebuilds();
@@ -1375,11 +1530,11 @@ impl AndroidApp {
                     tracing::warn!("REBUILD #{} (every 60th logged)", count);
                 }
                 if let (
-                    Some(ref mut app_instance),
-                    Some(ref surf),
-                    Some(ref config),
-                    Some(ref mut windowed_ctx),
-                    Some(ref rs),
+                    Some(app_instance),
+                    Some(surf),
+                    Some(config),
+                    Some(windowed_ctx),
+                    Some(rs),
                 ) = (
                     &mut blinc_app,
                     &surface,
@@ -1557,12 +1712,12 @@ impl AndroidApp {
                     tracing::info!("REDRAW #{} (every 120th logged)", count);
                 }
                 if let (
-                    Some(ref mut app_instance),
-                    Some(ref surf),
-                    Some(ref config),
-                    Some(ref mut windowed_ctx),
-                    Some(ref rs),
-                    Some(ref tree),
+                    Some(app_instance),
+                    Some(surf),
+                    Some(config),
+                    Some(windowed_ctx),
+                    Some(rs),
+                    Some(tree),
                 ) = (
                     &mut blinc_app,
                     &surface,
@@ -1615,6 +1770,7 @@ impl AndroidApp {
                         Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
                             tracing::warn!("Surface lost / outdated — reconfiguring swapchain");
                             surf.configure(app_instance.device(), config);
+                            needs_redraw_next_frame = true;
                         }
                         Err(wgpu::SurfaceError::OutOfMemory) => {
                             tracing::error!("Out of GPU memory");
@@ -1669,39 +1825,10 @@ impl AndroidApp {
     }
 
     /// Initialize GPU with a native window
-    fn init_gpu(window: &NativeWindow) -> Result<(BlincApp, wgpu::Surface<'static>)> {
+    fn init_gpu(window: &NativeWindow) -> Result<BlincApp> {
         use blinc_gpu::{GpuRenderer, RendererConfig, TextRenderingContext};
 
-        // Force the underlying ANativeWindow to use an opaque (no-alpha)
-        // pixel format BEFORE we create the wgpu/Vulkan swapchain on it.
-        //
-        // Why: NativeActivity windows default to a TRANSLUCENT pixel
-        // format on modern Android, which makes SurfaceFlinger composite
-        // our framebuffer using its alpha channel. On the Pixel 10 Pro /
-        // Tensor G5 PowerVR Vulkan driver this combines with `Inherit`
-        // composite alpha to produce a fully invisible window even though
-        // wgpu is rendering opaque content. `R8G8B8X8_UNORM` (the modern
-        // alias of the legacy `WINDOW_FORMAT_RGBX_8888`) tells the
-        // compositor "this surface has no alpha — treat every pixel as
-        // opaque". The Java-side `window.setFormat(PixelFormat.OPAQUE)`
-        // we set in MainActivity is silently overridden once the
-        // NativeActivity's native window comes up, so this NDK-side call
-        // (which lives in the same process and runs after InitWindow) is
-        // the authoritative one. Calling it on a window that's already
-        // RGBA8888 is harmless on devices where the bug doesn't apply.
-        if let Err(e) = window.set_buffers_geometry(
-            0,
-            0,
-            Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8X8_UNORM),
-        ) {
-            tracing::warn!(
-                "ANativeWindow_setBuffersGeometry(R8G8B8X8_UNORM) failed: {} \
-                — surface may composite with alpha and appear blank on PowerVR-class GPUs",
-                e
-            );
-        } else {
-            tracing::info!("ANativeWindow buffer format forced to R8G8B8X8_UNORM (opaque)");
-        }
+        Self::force_opaque_window_format(window);
 
         let config = crate::BlincConfig::default();
 
@@ -1721,24 +1848,7 @@ impl AndroidApp {
             ..Default::default()
         });
 
-        // Create surface from native window using raw handles
-        // Safety: The native window handle is valid for the lifetime of the window
-        use raw_window_handle::{
-            AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle,
-        };
-        use std::ptr::NonNull;
-
-        let raw_window = NonNull::new(window.ptr().as_ptr() as *mut std::ffi::c_void)
-            .ok_or_else(|| BlincError::GpuInit("Invalid native window pointer".to_string()))?;
-
-        let window_handle = AndroidNdkWindowHandle::new(raw_window);
-        let display_handle = AndroidDisplayHandle::new();
-
-        let surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: RawDisplayHandle::Android(display_handle),
-            raw_window_handle: RawWindowHandle::AndroidNdk(window_handle),
-        };
-
+        let surface_target = Self::surface_target_from_native_window(window)?;
         let surface = unsafe {
             instance
                 .create_surface_unsafe(surface_target)
@@ -1799,7 +1909,7 @@ impl AndroidApp {
         );
         let app = BlincApp::from_context(ctx, config);
 
-        Ok((app, surface))
+        Ok(app)
     }
 }
 
