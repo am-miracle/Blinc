@@ -773,8 +773,14 @@ fn build_menu_content(
                 .class("cn-context-menu-item")
                 .w_full()
                 .h_fit()
-                .py(padding / 4.0)
-                .px(padding / 2.0);
+                // Fallback MUST equal the `.cn-context-menu-item` CSS
+                // (space-1-5 / space-3 = 6px / 12px). `padding/4`,
+                // `padding/2` gave 12px / 24px — so on a hover-driven
+                // rebuild the row visibly grew/shifted when the class
+                // layout dropped to this fallback. Match the CSS so the
+                // two are indistinguishable (see the menubar fix).
+                .py(1.5)
+                .px(3.0);
             if has_submenu {
                 // CSS hook: `.cn-context-menu:has(.cn-context-menu-item--has-submenu:hover)`
                 // suppresses the parent menu's enter animation when
