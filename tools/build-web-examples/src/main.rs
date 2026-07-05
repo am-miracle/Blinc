@@ -144,7 +144,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // / `DivInputExt` / the gamepad types since the blinc_input absorption
         // — wrappers that use `blinc_canvas_kit::InputState` resolve through
         // this single entry.
-        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "da0d0540b82a0dc940351abf957a0499f4e9da11" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "61f2ea3d666656fc3c704a31445f6e71b1aa321e" }"#,
     ),
     (
         "blinc_gpu::",
@@ -215,7 +215,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // Same API behind the `gltf::` / `skeleton::` sub-modules.
         // Features flow through from the example crate's `gltf`
         // feature: platform-assets + bc-encode.
-        r#"{ git = "https://github.com/project-blinc/blinc_game_kit.git", rev = "66f2409d14035e667f7c77dc04dd7eee1c739e5f", features = ["platform-assets", "bc-encode"] }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_game_kit.git", rev = "10a8ced69f1dc5d04f6d729f47c4a7347d96797f", features = ["platform-assets", "bc-encode"] }"#,
     ),
     (
         "blinc_node_editor::",
@@ -224,7 +224,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // repo (`github.com/project-blinc/blinc_node_editor`) and is
         // pinned to the same rev `examples/blinc_app_examples/Cargo.toml`
         // uses. Bump in lockstep.
-        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "07680832128d334163490a3adb89c1bec9362869" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "34db86571efa998b5f0b60e58f5ed297b3630916" }"#,
     ),
     (
         "blinc_portal_ui::",
@@ -232,7 +232,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // Immediate-mode widget toolkit pulled by node_editor_demo for
         // its node body closures. Same downstream-repo pattern as
         // canvas_kit / node_editor — pinned to the workspace rev.
-        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "099864ab059cc869fbf26a65a60e587a29ac8b90" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "69aaf1b62f66b58c4e92d98f05af9eb0a9d61929" }"#,
     ),
     // `blinc_input` was absorbed into `blinc_canvas_kit::input` and the
     // standalone repo archived. Demos that previously imported
