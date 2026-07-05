@@ -4987,6 +4987,81 @@ mod tests {
         Ok(())
     }
 
+    fn run_tool(program: &str, args: &[&std::ffi::OsStr]) -> std::process::Output {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to run `{program}`. Install `naga` and `dxc` to run this check: {err}"
+                )
+            })
+    }
+
+    fn assert_tool_success(program: &str, args: &[&std::ffi::OsStr]) {
+        let output = run_tool(program, args);
+        if !output.status.success() {
+            panic!(
+                "`{program}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    fn assert_wgsl_compiles_to_dxil(name: &str, source: &str) {
+        let root =
+            std::env::temp_dir().join(format!("blinc-hlsl-dxc-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temporary shader check directory");
+
+        let wgsl_path = root.join(format!("{name}.wgsl"));
+        let hlsl_path = root.join(format!("{name}.hlsl"));
+        let vs_path = root.join(format!("{name}.vs.dxil"));
+        let ps_path = root.join(format!("{name}.ps.dxil"));
+
+        std::fs::write(&wgsl_path, source).expect("write WGSL source for HLSL check");
+
+        assert_tool_success(
+            "naga",
+            &[
+                std::ffi::OsStr::new("--input-kind"),
+                std::ffi::OsStr::new("wgsl"),
+                std::ffi::OsStr::new("--shader-model"),
+                std::ffi::OsStr::new("60"),
+                wgsl_path.as_os_str(),
+                hlsl_path.as_os_str(),
+            ],
+        );
+
+        assert_tool_success(
+            "dxc",
+            &[
+                std::ffi::OsStr::new("-T"),
+                std::ffi::OsStr::new("vs_6_0"),
+                std::ffi::OsStr::new("-E"),
+                std::ffi::OsStr::new("vs_main"),
+                std::ffi::OsStr::new("-Fo"),
+                vs_path.as_os_str(),
+                hlsl_path.as_os_str(),
+            ],
+        );
+
+        assert_tool_success(
+            "dxc",
+            &[
+                std::ffi::OsStr::new("-T"),
+                std::ffi::OsStr::new("ps_6_0"),
+                std::ffi::OsStr::new("-E"),
+                std::ffi::OsStr::new("fs_main"),
+                std::ffi::OsStr::new("-Fo"),
+                ps_path.as_os_str(),
+                hlsl_path.as_os_str(),
+            ],
+        );
+    }
+
     /// Runtime shader compilation is the only thing that parses these WGSL
     /// strings — if a case label or a const declaration is malformed, the
     /// error only surfaces when the app actually tries to build a pipeline
@@ -5101,6 +5176,20 @@ mod tests {
     #[test]
     fn sdf_shadow_dt_shader_parses() {
         parse_wgsl(SDF_SHADOW_DT_SHADER).expect("SDF_SHADOW_DT_SHADER");
+    }
+
+    /// Host-side guard for Windows issue #53.
+    ///
+    /// CI runs this on a Windows runner with the SDK `dxc.exe`; local runs can
+    /// use any `naga` + `dxc` install on PATH. It catches generated-HLSL
+    /// syntax/control-flow regressions in the shadow pipelines before they
+    /// reach D3D pipeline creation.
+    #[test]
+    #[ignore = "requires `naga` and `dxc` CLIs"]
+    fn sdf_shadow_hlsl_compiles_with_dxc() {
+        assert_wgsl_compiles_to_dxil("sdf_shadow", SDF_SHADOW_SHADER);
+        assert_wgsl_compiles_to_dxil("sdf_shadow_vb", SDF_SHADOW_VB_SHADER);
+        assert_wgsl_compiles_to_dxil("sdf_shadow_dt", SDF_SHADOW_DT_SHADER);
     }
 
     #[test]
