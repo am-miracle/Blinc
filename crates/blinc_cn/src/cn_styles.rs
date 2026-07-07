@@ -369,6 +369,38 @@ pub const CN_STYLES: &str = r#"
 .cn-input--md { font-size: var(--text-sm); }
 .cn-input--lg { font-size: var(--text-lg); }
 
+/* Input OTP. Border color is owned by Rust-side state setters. */
+
+.cn-input-otp-slot {
+    background: var(--cn-input-bg, var(--input-bg));
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    outline: 2px solid transparent;
+    outline-offset: 1px;
+    transition: outline-color 160ms ease, outline-offset 160ms ease;
+}
+.cn-input-otp-slot:hover {
+    border-color: var(--border-hover);
+    background: var(--input-bg-hover);
+}
+.cn-input-otp-slot:focus {
+    /* HID focus ring — see `.cn-input:focus` for rationale. */
+    border-color: var(--border-focus);
+    background: var(--input-bg-focus);
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+.cn-input-otp-slot--error {
+    border-color: var(--border-error);
+}
+.cn-input-otp-slot--error:focus {
+    border-color: var(--border-error);
+    outline: 2px solid var(--focus-ring-error);
+}
+.cn-input-otp--disabled {
+    opacity: 0.5;
+}
+
 /* ============================================================================
    Textarea
    ============================================================================ */
