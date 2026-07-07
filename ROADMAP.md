@@ -68,7 +68,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Time picker | Planned | Clock face or dropdown. See §1.5. |
 | Color picker | Planned | HSL/RGB wheel + swatches. See §1.5. |
 | Range slider (dual thumb) | Planned | Extend existing slider. See §1.5. |
-| Number input (stepper) | Planned | First-class `blinc_layout::widgets::number_input` — typed numeric value (i64 / f64), parse + clamp + commit FSM, increment/decrement keyboard handling (↑/↓/PageUp/PageDown), step/min/max/precision config, wraps `text_input` for the visible field. `cn::number_input` then themes it (see §1.5). |
+| Number input (stepper) | **Done** | First-class `blinc_layout::widgets::number_input` plus `cn::number_input` themed wrapper with steppers, bounds, precision, keyboard stepping, and stable width sizing. |
 | Data grid | Planned | Sortable, filterable table. See §1.5 (depends on cn::table). |
 | Virtualized list | **Done** | `virtual_list(count, builder)` — variable-height items, CSS classes, flexbox layout |
 | Rich text editor | **Done** | `rich_text_editor()` — formatting toolbar, undo/redo, selection, clipboard |
@@ -87,7 +87,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | `cn::toggle_group` | P0 | XS | `cn::toggle` | Radio-style toggle bar; single- or multi-select variants. |
 | `cn::number_input` | P0 | XS | `blinc_layout::number_input`, `cn::input` | Themed wrapper around the first-class `number_input` widget — applies cn surface (`.cn-input`-shaped border/focus ring, hover bg) plus the chevron up/down stepper buttons. Parse / clamp / commit logic lives in the layout widget; cn only contributes look + the stepper affordance. Roadmap §1.4 entry. |
 | `cn::table` | P0 | S | `blinc_layout::table` | Themed wrapper exposing `Table` / `TableHeader` / `TableBody` / `TableRow` / `TableCell` / `TableCaption` builders matching the shadcn surface. No sort/filter — that's `data_grid`. |
-| `cn::input_otp` | P0 | S | `cn::input` | Segmented PIN / OTP input (N digits). Focus chain across boxes with auto-advance on type, auto-rewind on backspace, paste fills all slots. |
+| `cn::input_otp` | P0 | S | `cn::input` | **Done** — segmented PIN / OTP input (N digits). Focus chain across boxes with auto-advance on type, empty-Backspace rewind, paste distribution, masking, grouping, and error styling. |
 | `cn::calendar` | P0 | M | — | Month grid + day cells + range / single selection. Hand-rolled date math (chrono is overkill for a UI calendar). Prereq for date picker. |
 | `cn::date_picker` | P0 | M | `cn::calendar`, `cn::popover` | Input + popover-mounted calendar. Roadmap §1.4 entry. |
 | `cn::form` | P0 | M | — | Typed schema + field-binding wrapper. Field `State`s register into a form context; submit collects + validates. Should integrate with `cn::input` / `cn::textarea` / `cn::select` / `cn::checkbox` field variants surfacing error state via CSS class (e.g. `.cn-input--invalid`). |

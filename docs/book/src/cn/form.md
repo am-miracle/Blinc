@@ -47,6 +47,30 @@ input().readonly(true)
 input().error(true)
 ```
 
+## OTP Input
+
+Segmented one-time-code input:
+
+```rust
+use blinc_cn::prelude::*;
+
+let code = ctx.use_state_keyed("verification_code", || String::new());
+
+cn::input_otp(&code, 6)
+    .numeric_only(true)
+    .on_complete(|code| println!("complete code: {code}"))
+```
+
+### OTP Options
+
+```rust
+cn::input_otp(&code, 6)
+    .numeric_only(true)
+    .masked(false)
+    .group_every(3)
+    .error(has_error)
+```
+
 ## Textarea
 
 Multi-line text input:
