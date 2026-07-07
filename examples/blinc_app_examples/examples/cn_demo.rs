@@ -721,11 +721,15 @@ fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let qty = ctx.use_state_keyed("number_qty", || 1.0);
     let temperature = ctx.use_state_keyed("number_temp", || 22.5);
 
+    let otp_code = ctx.use_state_keyed("otp_code", || String::new());
+
     section_container()
         .child(section_title("Form Inputs"))
         .child(
             div()
                 .flex_row()
+                .flex_wrap()
+                .items_start()
                 .w_full()
                 .gap_px(24.0)
                 .h_fit()
@@ -806,6 +810,19 @@ fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
                                                 .precision(1),
                                         ),
                                 ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_col()
+                        .w_fit()
+                        .h_fit()
+                        .gap_px(4.0)
+                        .child(cn::label("Verification code"))
+                        .child(
+                            cn::input_otp(&otp_code, 6)
+                                .numeric_only(true)
+                                .on_complete(|code| println!("otp complete: {code}")),
                         ),
                 ),
         )

@@ -1123,6 +1123,16 @@ pub struct TextInputData {
     /// `State<f64>`. Unset by default so a plain text input still
     /// accepts a typed `-` as the leading sign of a negative number.
     pub(crate) on_step_callback: Option<Arc<dyn Fn(i32) + Send + Sync>>,
+    /// Forces the next render sync to apply even while focused (used by
+    /// `cn::number_input`'s stepper hook). Consumed on read.
+    pub force_sync_once: bool,
+    /// Hook for composite inputs that need empty-Backspace behavior.
+    pub(crate) on_backspace_empty_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Hook for composite inputs that need to own paste handling.
+    pub(crate) on_paste_override_callback: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// Hook for composite inputs that need to redirect focus before the
+    /// field becomes active.
+    pub(crate) on_focus_request_callback: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// CSS element ID for stylesheet matching (set via TextInput::id())
     pub(crate) css_element_id: Option<String>,
     /// CSS class names for stylesheet matching (set via TextInput::class())
@@ -1204,7 +1214,11 @@ impl TextInputData {
             layout_bounds_storage: Arc::new(Mutex::new(None)),
             stateful_state: None,
             on_change_callback: None,
+            force_sync_once: false,
             on_step_callback: None,
+            on_backspace_empty_callback: None,
+            on_paste_override_callback: None,
+            on_focus_request_callback: None,
             css_element_id: None,
             css_classes: Vec::new(),
             last_click_time: None,
@@ -2209,11 +2223,8 @@ impl TextInput {
                         border_color
                     };
 
-                    // Apply visual styling directly to the container (preserves fixed dimensions)
-                    // This is the key fix: use set_* methods instead of merge() to avoid
-                    // overwriting layout properties like width set on the outer Stateful
+                    // Visual refresh must not rewrite width set on the outer Stateful.
                     let mut inner = div()
-                        .w_full()
                         .bg(bg)
                         .border(cfg.border_width, border_color)
                         .rounded(cfg.corner_radius);
@@ -2279,6 +2290,17 @@ impl TextInput {
 
                     if d.disabled {
                         return;
+                    }
+
+                    if let Some(cb) = d.on_focus_request_callback.as_ref().map(Arc::clone) {
+                        drop(d);
+                        if cb() {
+                            return;
+                        }
+                        d = match data_for_click.lock() {
+                            Ok(d) => d,
+                            Err(_) => return,
+                        };
                     }
 
                     // Bump the focus-tap generation counter so the
@@ -2638,14 +2660,13 @@ impl TextInput {
                     }
                 }; // Lock released here
 
-                // Trigger incremental refresh AFTER releasing the data lock
-                if needs_refresh {
-                    refresh_stateful(&stateful_for_text);
-                }
-
-                // Call on_change callback after lock is released
+                // Callbacks may normalize data before the refresh reads it.
                 if let Some((callback, new_value)) = callback_info {
                     callback(&new_value);
+                }
+
+                if needs_refresh {
+                    refresh_stateful(&stateful_for_text);
                 }
             })
             // Handle key down for navigation and deletion
@@ -2670,6 +2691,15 @@ impl TextInput {
                             // Cmd+Backspace: delete word backward
                             d.delete_word_backward();
                             value_changed = true;
+                        }
+                        8 if d.value.is_empty() && d.on_backspace_empty_callback.is_some() => {
+                            // OTP rewinds focus when Backspace hits an empty slot.
+                            if let Some(cb) = d.on_backspace_empty_callback.as_ref().map(Arc::clone)
+                            {
+                                drop(d);
+                                cb();
+                            }
+                            return;
                         }
                         8 => {
                             // Backspace
@@ -2742,6 +2772,21 @@ impl TextInput {
                                             .filter(|c| *c != '\n' && *c != '\r')
                                             .collect();
                                         if !clean.is_empty() {
+                                            // Drop the lock before calling out — the
+                                            // override (input_otp) may need to re-lock
+                                            // this same slot's data.
+                                            let override_cb = d.on_paste_override_callback.clone();
+                                            if let Some(cb) = override_cb {
+                                                drop(d);
+                                                let handled = cb(&clean);
+                                                if handled {
+                                                    return;
+                                                }
+                                                d = match data_for_key.lock() {
+                                                    Ok(d) => d,
+                                                    Err(_) => return,
+                                                };
+                                            }
                                             if d.selection_start.is_some() {
                                                 d.delete_selection();
                                             }
@@ -2795,17 +2840,16 @@ impl TextInput {
                     ((changed, should_blur), cb_info)
                 }; // Lock released here
 
+                // Callbacks may normalize data before the refresh reads it.
+                if let Some((callback, new_value)) = callback_info {
+                    callback(&new_value);
+                }
+
                 // Handle blur (Escape key)
                 if needs_refresh.1 {
                     blur_all_text_inputs();
                 } else if needs_refresh.0 {
-                    // Trigger incremental refresh AFTER releasing the data lock
                     refresh_stateful(&stateful_for_key);
-                }
-
-                // Call on_change callback after lock is released
-                if let Some((callback, new_value)) = callback_info {
-                    callback(&new_value);
                 }
             })
             // Set text cursor (I-beam) for text input
@@ -3146,6 +3190,39 @@ impl TextInput {
         self
     }
 
+    /// Override Backspace on an empty field.
+    pub fn on_backspace_empty<F>(self, callback: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        if let Ok(mut d) = self.data.lock() {
+            d.on_backspace_empty_callback = Some(Arc::new(callback));
+        }
+        self
+    }
+
+    /// Override Cmd/Ctrl+V paste handling.
+    pub fn on_paste_override<F>(self, callback: F) -> Self
+    where
+        F: Fn(&str) -> bool + Send + Sync + 'static,
+    {
+        if let Ok(mut d) = self.data.lock() {
+            d.on_paste_override_callback = Some(Arc::new(callback));
+        }
+        self
+    }
+
+    /// Override pointer focus handling. Return `true` to consume focus.
+    pub fn on_focus_request<F>(self, callback: F) -> Self
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        if let Ok(mut d) = self.data.lock() {
+            d.on_focus_request_callback = Some(Arc::new(callback));
+        }
+        self
+    }
+
     pub fn disabled(self, disabled: bool) -> Self {
         if let Ok(mut d) = self.data.lock() {
             d.disabled = disabled;
@@ -3438,6 +3515,18 @@ impl ElementBuilder for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::div::ElementBuilder;
+    use crate::event_handler::EventContext;
+    use crate::tree::LayoutNodeId;
+    use blinc_core::events::event_types;
+    use std::sync::{Arc, Mutex, Once};
+    use taffy::Dimension;
+
+    static THEME_INIT: Once = Once::new();
+
+    fn ensure_theme_initialized() {
+        THEME_INIT.call_once(ThemeState::init_default);
+    }
 
     #[test]
     fn test_text_input_data_insert() {
@@ -3480,5 +3569,91 @@ mod tests {
         data.cursor = 0;
         data.insert("abc123");
         assert_eq!(data.value, "123");
+    }
+
+    /// Regression test: keyboard stepping while focused used to leave
+    /// the displayed value stale — the focus guard meant for typing
+    /// swallowed step changes too.
+    #[test]
+    fn force_sync_once_overrides_focus_guard_for_step_changes() {
+        let mut data = TextInputData::with_value("5");
+        data.stateful_state = None;
+        data.visual = TextFieldState::Focused;
+
+        // Typing case: no flag, stays guarded.
+        let is_focused = data.visual.is_focused();
+        let force = std::mem::take(&mut data.force_sync_once);
+        assert!(!(force || !is_focused));
+
+        // Step case: flag forces the sync through despite focus, then
+        // resets so it doesn't leak into the next one.
+        data.force_sync_once = true;
+        let is_focused = data.visual.is_focused();
+        let force = std::mem::take(&mut data.force_sync_once);
+        assert!(force || !is_focused);
+        assert!(!data.force_sync_once);
+    }
+
+    #[test]
+    fn text_input_refresh_sees_value_normalized_by_on_change() {
+        ensure_theme_initialized();
+
+        let data = text_input_data();
+        {
+            let mut data = data.lock().unwrap();
+            data.visual = TextFieldState::Focused;
+        }
+
+        let data_for_change = Arc::clone(&data);
+        let input = text_input(&data)
+            .input_type(InputType::Integer)
+            .on_change(move |_| {
+                let mut data = data_for_change.lock().unwrap();
+                data.value.clear();
+                data.cursor = 0;
+                data.selection_start = None;
+            });
+
+        let values_seen_by_refresh = Arc::new(Mutex::new(Vec::new()));
+        let values_for_spy = Arc::clone(&values_seen_by_refresh);
+        let data_for_spy = Arc::clone(&data);
+        let stateful_state = data
+            .lock()
+            .unwrap()
+            .stateful_state
+            .clone()
+            .expect("text_input should install a stateful state");
+
+        {
+            let mut shared = stateful_state.lock().unwrap();
+            shared.node_id = Some(LayoutNodeId::default());
+            shared.state_callback = Some(Arc::new(move |_, _| {
+                values_for_spy
+                    .lock()
+                    .unwrap()
+                    .push(data_for_spy.lock().unwrap().value.clone());
+            }));
+        }
+
+        let ctx =
+            EventContext::new(event_types::TEXT_INPUT, LayoutNodeId::default()).with_key_char('-');
+        input.event_handlers().unwrap().dispatch(&ctx);
+
+        assert_eq!(data.lock().unwrap().value, "");
+        assert_eq!(*values_seen_by_refresh.lock().unwrap(), vec![String::new()]);
+    }
+
+    #[test]
+    fn state_callback_preserves_explicit_width() {
+        ensure_theme_initialized();
+
+        let data = text_input_data();
+        let input = text_input(&data).w(42.0);
+
+        let mut tree = LayoutTree::new();
+        let root = input.build(&mut tree);
+        let style = tree.get_style(root).unwrap();
+
+        assert_eq!(style.size.width, Dimension::Length(42.0));
     }
 }

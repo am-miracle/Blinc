@@ -38,6 +38,7 @@ pub mod code;
 pub mod cursor;
 pub mod gesture;
 pub mod hr;
+pub mod input_otp;
 pub mod link;
 pub mod list;
 #[cfg(feature = "media")]
@@ -72,6 +73,8 @@ pub use toggle::{Toggle, ToggleBuilder, ToggleConfig, toggle};
 pub use number_input::{
     NumberInput, NumberInputBuilder, NumberInputConfig, number_input, step_down, step_up,
 };
+
+pub use input_otp::{InputOtp, InputOtpBuilder, InputOtpConfig, input_otp};
 
 // Re-export text input widget
 pub use text_input::{

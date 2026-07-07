@@ -72,6 +72,7 @@ pub mod cn {
     pub use crate::components::hover_card::hover_card;
     pub use crate::components::icon::{IconSize, icon};
     pub use crate::components::input::input;
+    pub use crate::components::input_otp::input_otp;
     pub use crate::components::kbd::{KbdSize, kbd};
     pub use crate::components::label::label;
     pub use crate::components::menubar::{MenuTriggerMode, MenuTriggerStyle, menubar};
@@ -166,6 +167,7 @@ pub mod prelude {
     };
     pub use crate::components::icon::{Icon, IconBuilder, IconSize, icon};
     pub use crate::components::input::{Input, InputBgColors, InputBorderColors, InputSize, input};
+    pub use crate::components::input_otp::{InputOtp, InputOtpBuilder, input_otp};
     pub use crate::components::kbd::{Kbd, KbdBuilder, KbdSize, kbd};
     pub use crate::components::label::{Label, LabelBuilder, LabelSize, label};
     pub use crate::components::menubar::{

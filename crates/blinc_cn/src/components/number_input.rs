@@ -254,7 +254,10 @@ impl NumberInput {
                 // through this path.
                 if let Ok(mut d) = data_for_render.lock() {
                     let is_focused = d.visual.is_focused();
-                    if !is_focused && d.value != formatted {
+                    // Step changes (see on_step below) must still sync
+                    // while focused — only typing should skip this.
+                    let force = std::mem::take(&mut d.force_sync_once);
+                    if (force || !is_focused) && d.value != formatted {
                         d.value = formatted.clone();
                         d.cursor = d.value.chars().count();
                         d.selection_start = None;
@@ -262,22 +265,11 @@ impl NumberInput {
                     }
                 }
 
-                // Fixed-width recommendation: the field defaults to a
-                // sensible cell that comfortably holds up to ~6
-                // characters at the current font, and the value is
-                // centred inside it via `text_align: Center` below.
-                // Callers can override the total width via
-                // [`NumberInputBuilder::w`] when the bound range
-                // needs more room (or less). Centred text in a
-                // fixed cell is the canonical numeric-input look —
-                // matches shadcn / HIG / Material specs.
                 const DEFAULT_FIELD_W: f32 = 32.0;
-                let _ = formatted; // formatted is synced into the
-                // visible field above; no longer
-                // used for width calc since width
-                // is fixed.
+                let auto_field_w =
+                    auto_field_width(cfg_min, cfg_max, cfg_precision, font_size, DEFAULT_FIELD_W);
                 let total_w = cfg_explicit_w
-                    .unwrap_or_else(|| (DEFAULT_FIELD_W + button_w * 2.0).min(cfg_max_width));
+                    .unwrap_or_else(|| (auto_field_w + button_w * 2.0).min(cfg_max_width));
                 let field_w = (total_w - button_w * 2.0).max(DEFAULT_FIELD_W);
 
                 // Field — text_input directly so cn owns the data
@@ -287,11 +279,6 @@ impl NumberInput {
                 let mut field = text_input(&data_for_render)
                     .input_type(InputType::Number)
                     .text_align(blinc_core::TextAlign::Center)
-                    // Tight padding — the value is centred inside a
-                    // fixed-width cell, so the standard 12 px form-
-                    // input padding just bloats the cell. 4 px each
-                    // side is enough breathing room for a centred
-                    // numeric value.
                     .padding_x(4.0)
                     .w(field_w)
                     .h(height)
@@ -308,11 +295,18 @@ impl NumberInput {
                     let max = cfg_max;
                     let step = cfg_step;
                     let on_change = cfg_on_change.clone();
+                    let data_for_step = data_for_render.clone();
                     field = field.on_step(move |delta| {
                         let direction = delta as f64;
                         let next = clamp(state.get() + direction * step, min, max);
                         if (next - state.get()).abs() < f64::EPSILON {
                             return; // at bound — no-op
+                        }
+                        // Set before state.set() — it can synchronously
+                        // trigger the sync above, so the flag must
+                        // already be visible when that runs.
+                        if let Ok(mut d) = data_for_step.lock() {
+                            d.force_sync_once = true;
                         }
                         state.set(next);
                         if let Some(ref cb) = on_change {
@@ -501,11 +495,20 @@ fn clamp(value: f64, min: Option<f64>, max: Option<f64>) -> f64 {
     if let Some(hi) = max { v.min(hi) } else { v }
 }
 
+fn auto_field_width(
+    min: Option<f64>,
+    max: Option<f64>,
+    precision: usize,
+    font_size: f32,
+    min_width: f32,
+) -> f32 {
+    let chars = estimate_max_chars(min, max, precision).max(2) as f32;
+    (chars * font_size * 0.65 + 8.0).max(min_width)
+}
+
 /// Estimate the widest visible string length given precision + bounds.
-/// Used to size the input field so short values (`1`) get a tight cell
-/// and long values (`-50.0`) get enough room — visually the value reads
-/// near-centered in either case because the field width tracks the
-/// content. Bounds-less inputs fall back to a generous 6-char default.
+/// Width is based on bounds, not the current value, so digit entry does
+/// not resize the control.
 fn estimate_max_chars(min: Option<f64>, max: Option<f64>, precision: usize) -> usize {
     let chars_for = |v: f64| -> usize {
         // Integer part length: `log10(|v|)` clamped to ≥ 1, plus sign.
@@ -606,4 +609,84 @@ impl ElementBuilder for NumberInputBuilder {
 #[track_caller]
 pub fn number_input(state: &State<f64>) -> NumberInputBuilder {
     NumberInputBuilder::new(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Once;
+    use std::sync::atomic::AtomicBool;
+
+    use blinc_core::{BlincContextState, HookState, ReactiveGraph};
+    use taffy::{AvailableSpace, Size};
+
+    static INIT_CONTEXT: Once = Once::new();
+
+    fn init_theme() {
+        let _ = ThemeState::try_get().unwrap_or_else(|| {
+            ThemeState::init_default();
+            ThemeState::get()
+        });
+
+        INIT_CONTEXT.call_once(|| {
+            BlincContextState::init(
+                Arc::new(std::sync::Mutex::new(ReactiveGraph::new())),
+                Arc::new(std::sync::Mutex::new(HookState::new())),
+                Arc::new(AtomicBool::new(false)),
+            );
+        });
+    }
+
+    fn test_state(initial: f64) -> State<f64> {
+        let graph = Arc::new(std::sync::Mutex::new(ReactiveGraph::new()));
+        let signal = graph.lock().unwrap().create_signal(initial);
+        State::new(signal, graph, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn number_input_widths(value: f64) -> (f32, f32) {
+        init_theme();
+
+        let state = test_state(value);
+        let input = number_input(&state)
+            .min(0.0)
+            .max(99.0)
+            .step(1.0)
+            .precision(0);
+
+        let mut tree = LayoutTree::new();
+        let root = input.build(&mut tree);
+        tree.compute_layout(
+            root,
+            Size {
+                width: AvailableSpace::Definite(400.0),
+                height: AvailableSpace::Definite(120.0),
+            },
+        );
+
+        let group = tree.children(root)[0];
+        let field = tree.children(group)[1];
+        (
+            tree.get_bounds(group, (0.0, 0.0)).unwrap().width,
+            tree.get_bounds(field, (0.0, 0.0)).unwrap().width,
+        )
+    }
+
+    #[test]
+    fn auto_width_covers_configured_range() {
+        assert_eq!(estimate_max_chars(Some(0.0), Some(99.0), 0), 2);
+        assert_eq!(estimate_max_chars(Some(-50.0), Some(60.0), 1), 5);
+        assert!(
+            auto_field_width(Some(-50.0), Some(60.0), 1, 14.0, 32.0)
+                > auto_field_width(Some(0.0), Some(99.0), 0, 14.0, 32.0)
+        );
+    }
+
+    #[test]
+    fn group_width_does_not_grow_with_digits() {
+        let short = number_input_widths(1.0);
+        let long = number_input_widths(99.0);
+
+        assert_eq!(short, long);
+    }
 }
