@@ -143,6 +143,43 @@ let current_text = state.text();
 
 ---
 
+## OTP Input
+
+`input_otp` renders linked single-character text input slots for
+verification codes and PINs. It keeps a joined `State<String>` in sync
+while handling focus movement across slots.
+
+```rust
+use blinc_layout::widgets::input_otp::input_otp;
+
+fn verification_code(ctx: &WindowedContext) -> impl ElementBuilder {
+    let code = ctx.use_state_keyed("otp_code", || String::new());
+
+    input_otp(&code, 6)
+        .numeric_only(true)
+        .on_complete(|code| println!("complete code: {code}"))
+}
+```
+
+### Behavior
+
+- Typing a character advances focus to the next slot.
+- Backspace on an empty slot rewinds focus and clears the previous slot.
+- Pasting distributes characters across the remaining slots.
+- `numeric_only(true)` filters typed and pasted input to ASCII digits.
+
+### Options
+
+```rust
+input_otp(&code, 6)
+    .numeric_only(true)
+    .masked(false)
+    .gap(8.0)
+    .class("verification-code")
+```
+
+---
+
 ## Text Area
 
 ### Basic Text Area

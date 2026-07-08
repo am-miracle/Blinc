@@ -117,6 +117,11 @@ textarea()
     .placeholder("Enter message...")
     .rows(4)
 
+// OTP input
+cn::input_otp(&code, 6)
+    .numeric_only(true)
+    .on_complete(|code| verify_code(code))
+
 // Checkbox
 checkbox()
     .checked(is_checked)
