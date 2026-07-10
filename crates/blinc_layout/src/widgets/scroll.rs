@@ -441,6 +441,25 @@ impl ScrollPhysics {
         }
     }
 
+    /// Whether edge-bounce (the overscroll spring) is active.
+    ///
+    /// Hard-disabled on mobile targets for now: momentum and the strict
+    /// edge clamp stay, but the rubber-band stretch + spring rebound are
+    /// suppressed so touch scrolling stops flat at the edge. Reading the
+    /// config through this accessor (instead of the field directly) means
+    /// an app enabling bounce still gets a plain clamp on Android/iOS.
+    #[inline]
+    fn bounce_enabled(&self) -> bool {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            false
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            self.config.bounce_enabled
+        }
+    }
+
     /// Set the animation scheduler (for spring-based bounce animation)
     pub fn set_scheduler(&mut self, scheduler: &Arc<Mutex<AnimationScheduler>>) {
         self.scheduler = Arc::downgrade(scheduler);
@@ -560,11 +579,11 @@ impl ScrollPhysics {
             // pull-back momentum deltas so the spring is the sole source of
             // return motion. That keeps the behaviour identical on every
             // platform regardless of whether the OS emits its own momentum.
-            if self.is_overscrolling_y() && self.config.bounce_enabled && pulling_back {
+            if self.is_overscrolling_y() && self.bounce_enabled() && pulling_back {
                 // Platform-generated pull-back momentum — let the spring
                 // handle the return. Applying these deltas would race the
                 // spring and cause a double-rebound.
-            } else if self.is_overscrolling_y() && self.config.bounce_enabled && pushing_further {
+            } else if self.is_overscrolling_y() && self.bounce_enabled() && pushing_further {
                 // Asymptotic rubber-band resistance. The rate at which
                 // additional overscroll is accepted falls off as the
                 // current stretch grows, so the first delta past the
@@ -589,7 +608,7 @@ impl ScrollPhysics {
             // momentum that streams after a rebound can't stretch the
             // content again — user scrolls into the content area still
             // go through because they don't need the overscroll region.
-            if !self.config.bounce_enabled || self.in_momentum_mode {
+            if !self.bounce_enabled() || self.in_momentum_mode {
                 self.offset_y = self
                     .offset_y
                     .clamp(self.max_offset_y(), self.min_offset_y());
@@ -626,9 +645,9 @@ impl ScrollPhysics {
 
             // Pull-back deltas are ignored — spring drives the rebound. See
             // Y-axis branch for the full rationale.
-            if self.is_overscrolling_x() && self.config.bounce_enabled && pulling_back {
+            if self.is_overscrolling_x() && self.bounce_enabled() && pulling_back {
                 // Ignored — spring handles return.
-            } else if self.is_overscrolling_x() && self.config.bounce_enabled && pushing_further {
+            } else if self.is_overscrolling_x() && self.bounce_enabled() && pushing_further {
                 // Asymptotic rubber-band resistance — see Y-axis branch.
                 const C: f32 = 0.55;
                 let d = self.viewport_width.max(1.0);
@@ -642,7 +661,7 @@ impl ScrollPhysics {
 
             // Clamp to bounds. See Y-axis branch for the rationale on
             // the `in_momentum_mode` strict-clamp.
-            if !self.config.bounce_enabled || self.in_momentum_mode {
+            if !self.bounce_enabled() || self.in_momentum_mode {
                 self.offset_x = self
                     .offset_x
                     .clamp(self.max_offset_x(), self.min_offset_x());
@@ -736,7 +755,7 @@ impl ScrollPhysics {
         if current_time_ms - last <= 200.0 {
             return;
         }
-        if self.is_overscrolling() && self.config.bounce_enabled {
+        if self.is_overscrolling() && self.bounce_enabled() {
             self.on_scroll_end();
         } else {
             self.last_scroll_time = None;
@@ -775,7 +794,7 @@ impl ScrollPhysics {
         // If stretched, fire the spring. Subsequent momentum deltas
         // (drops when state == Bouncing, clamped at edge when the spring
         // settles and state flips back to Idle) can't fight the rebound.
-        if self.is_overscrolling() && self.config.bounce_enabled {
+        if self.is_overscrolling() && self.bounce_enabled() {
             self.start_bounce();
             return;
         }
@@ -801,7 +820,7 @@ impl ScrollPhysics {
     pub fn on_gesture_end(&mut self) {
         // If overscrolling, start bounce immediately on finger lift
         // This gives snappy iOS-like feedback where release = snap back
-        if self.is_overscrolling() && self.config.bounce_enabled {
+        if self.is_overscrolling() && self.bounce_enabled() {
             self.start_bounce();
         }
     }
@@ -943,7 +962,7 @@ impl ScrollPhysics {
                 // overscrolled. Inputs without a reliable end phase still need
                 // a short tick window so `check_idle_bounce` can fire the
                 // rebound spring even when the scrollbar is hidden.
-                self.config.bounce_enabled && self.is_overscrolling()
+                self.bounce_enabled() && self.is_overscrolling()
             }
 
             ScrollState::Decelerating => {
