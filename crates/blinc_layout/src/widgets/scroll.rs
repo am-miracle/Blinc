@@ -251,7 +251,7 @@ impl Default for ScrollConfig {
             // Critical damping = 2 * sqrt(stiffness * mass) = 2 * sqrt(3000) ≈ 109.5
             // Using damping = 110 (slightly overdamped) for fast snap with no rebound
             bounce_spring: SpringConfig::new(3000.0, 110.0, 1.0),
-            deceleration: 1500.0,    // Decelerate at 1500 px/s²
+            deceleration: 1500.0, // Decelerate at 1500 px/s² (shared with desktop/web)
             velocity_threshold: 3.0, // Stop when below 3 px/s
             // Safety cap on visible overscroll as a fraction of viewport.
             // The apparent-stretch curve in `apply_scroll_delta` tapers
@@ -704,15 +704,31 @@ impl ScrollPhysics {
         if let Some(last_time) = self.last_scroll_time {
             let dt_seconds = ((current_time - last_time) / 1000.0) as f32;
             if dt_seconds > 0.0 && dt_seconds < 0.5 {
-                // Smooth velocity using exponential moving average
-                let alpha = 0.3; // Smoothing factor
+                // Smooth velocity using exponential moving average.
+                // Weight the most recent sample heavily so a quick flick's
+                // release velocity reflects the *end* of the gesture, not an
+                // average dragged down by its slow start. At 0.3 the EMA lagged
+                // ~0.1s (worse at low frame rates, where touch deltas batch
+                // per render frame), so momentum launched far slower than the
+                // finger was actually moving — the "heavy/slow coast".
+                let alpha = 0.6; // Smoothing factor (recent-weighted)
                 let instant_vx = delta_x / dt_seconds;
                 let instant_vy = delta_y / dt_seconds;
                 self.velocity_x = self.velocity_x * (1.0 - alpha) + instant_vx * alpha;
                 self.velocity_y = self.velocity_y * (1.0 - alpha) + instant_vy * alpha;
             }
         } else {
-            // First event - initialize velocity from delta assuming 16ms frame
+            // First event of a fresh gesture (the previous end nulled
+            // `last_scroll_time`). Clear `in_momentum_mode` here: it exists for
+            // macOS's TWO scroll-end calls per gesture (finger-lift, then a
+            // separate momentum-end). Touch fires scroll-end only ONCE, so the
+            // flag was left latched `true` after the first flick and made the
+            // NEXT flick's finger-lift look like a momentum-end — `on_scroll_end`
+            // then early-returned without launching momentum, so every other
+            // swipe produced no coast. Resetting it at gesture start makes each
+            // touch flick a clean finger-lift.
+            self.in_momentum_mode = false;
+            // Initialize velocity from delta assuming 16ms frame
             self.velocity_x = delta_x * 60.0;
             self.velocity_y = delta_y * 60.0;
         }
@@ -979,8 +995,8 @@ impl ScrollPhysics {
                 // The config's `deceleration` field (px/s²) is the single
                 // knob, reinterpreted as a decay-rate driver: `k =
                 // deceleration / V_REF` is 1/τ of the exponential (s⁻¹);
-                // `V_REF = 500 px/s` makes the default `deceleration =
-                // 1500` a friction of ≈0.95 per 60Hz frame (iOS-like).
+                // `V_REF = 500 px/s`, so the default `deceleration = 1500`
+                // is k = 3 → ≈0.951 friction per 60Hz frame.
                 const V_REF: f32 = 500.0;
                 let k = self.config.deceleration / V_REF;
                 let friction = (-k * dt).exp();
