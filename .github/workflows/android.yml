@@ -52,10 +52,34 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Install the NDK via sdkmanager directly with retries. The
+      # android-actions/setup-android action does not retry, and its NDK
+      # download intermittently corrupts mid-extract ("Error on ZipFile
+      # unknown archive"), failing the whole matrix. Retry with a clean
+      # slate between attempts so a partial download can't poison a retry.
       - name: Setup Android NDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'ndk;27.0.12077973'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK_VER=27.0.12077973
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1 || true)
+          fi
+          [ -n "$SDKMANAGER" ] || { echo "::error::sdkmanager not found under $ANDROID_HOME"; exit 1; }
+          echo "Using sdkmanager: $SDKMANAGER"
+          for attempt in 1 2 3 4; do
+            if yes | "$SDKMANAGER" "ndk;${NDK_VER}" \
+                && [ -d "$ANDROID_HOME/ndk/${NDK_VER}/toolchains" ]; then
+              echo "NDK ${NDK_VER} installed on attempt ${attempt}"
+              exit 0
+            fi
+            echo "::warning::NDK install attempt ${attempt} failed; clearing partial download"
+            rm -rf "$ANDROID_HOME/ndk/${NDK_VER}"
+            sleep $((attempt * 10))
+          done
+          echo "::error::NDK ${NDK_VER} install failed after 4 attempts"
+          exit 1
 
       - name: Set up NDK environment
         run: |
