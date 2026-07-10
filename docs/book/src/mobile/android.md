@@ -77,9 +77,9 @@ android_logger = "0.14"
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="true"
-            android:launchMode="singleTask">
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|colorMode|fontScale|locale|layoutDirection|touchscreen|mcc|mnc"
+            android:exported="true">
 
             <meta-data
                 android:name="android.app.lib_name"
@@ -101,6 +101,18 @@ android_logger = "0.14"
     </application>
 </manifest>
 ```
+
+> **Critical — do not trim `launchMode` or `configChanges`.** Blinc runs on a
+> `NativeActivity`, whose native context (`ndk-context`) can only be
+> initialized once per process. If Android destroys and recreates the activity
+> (a config change the manifest doesn't declare, or a launcher-icon resume that
+> spawns a second activity instance), the second init hits
+> `assert!(previous.is_none())` and the process aborts (SIGABRT) — Android then
+> cold-restarts the app, which the user sees as "resume flashes black and comes
+> back with fresh state." `launchMode="singleTask"` makes an icon tap resume the
+> single instance instead of creating a new one, and the broad `configChanges`
+> list keeps config changes (dark mode, density, font scale, insets, …) from
+> destroying the activity. Both are required, not optional.
 
 ## Debugging
 
