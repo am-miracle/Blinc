@@ -71,7 +71,87 @@ fn requested_device_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     if available.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
         features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
     }
+    // Persisted pipeline cache: on mobile, rebuilding all render pipelines
+    // from scratch every launch is the dominant cold-start cost (measured
+    // ~925ms for the core pipelines on a Pixel 10 Pro). A serialized
+    // `PipelineCache` collapses that on every launch after the first.
+    if available.contains(wgpu::Features::PIPELINE_CACHE) {
+        features |= wgpu::Features::PIPELINE_CACHE;
+    }
     features
+}
+
+// On-disk pipeline-cache header. Bump the version when the layout changes.
+const PIPELINE_CACHE_MAGIC: &[u8; 4] = b"BLPC";
+const PIPELINE_CACHE_VERSION: u32 = 1;
+// magic(4) + version(4) + vendor(4) + device(4) + driver_hash(8)
+// + data_len(8) + data_hash(8)
+const PIPELINE_CACHE_HEADER_LEN: usize = 40;
+
+fn stable_hash_str(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+fn stable_hash_bytes(b: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(b);
+    h.finish()
+}
+
+fn pipeline_cache_driver_key(info: &wgpu::AdapterInfo) -> u64 {
+    stable_hash_str(&format!("{}|{}", info.driver, info.driver_info))
+}
+
+/// Load previously-serialized `PipelineCache` data, validated against the
+/// current adapter. Android drivers do minimal integrity checking on cache
+/// blobs, so we gate the data behind a header (magic, layout version,
+/// vendor/device IDs, driver string hash, and a hash of the payload) and
+/// hand nothing to the driver unless every field matches. `fallback: true`
+/// on the descriptor is the second safety net.
+fn load_pipeline_cache_data(path: &std::path::Path, info: &wgpu::AdapterInfo) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < PIPELINE_CACHE_HEADER_LEN || &bytes[0..4] != PIPELINE_CACHE_MAGIC {
+        return None;
+    }
+    let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+    let u64_at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
+    if u32_at(4) != PIPELINE_CACHE_VERSION
+        || u32_at(8) != info.vendor
+        || u32_at(12) != info.device
+        || u64_at(16) != pipeline_cache_driver_key(info)
+    {
+        return None;
+    }
+    let data_len = u64_at(24) as usize;
+    let data_hash = u64_at(32);
+    let data = bytes.get(PIPELINE_CACHE_HEADER_LEN..PIPELINE_CACHE_HEADER_LEN + data_len)?;
+    if stable_hash_bytes(data) != data_hash {
+        return None;
+    }
+    Some(data.to_vec())
+}
+
+/// Serialize `PipelineCache` data with the validation header, keyed to the
+/// current adapter. Best-effort: write to a temp file and rename so a
+/// half-written cache is never read on the next launch.
+fn save_pipeline_cache_data(path: &std::path::Path, info: &wgpu::AdapterInfo, data: &[u8]) {
+    let mut out = Vec::with_capacity(PIPELINE_CACHE_HEADER_LEN + data.len());
+    out.extend_from_slice(PIPELINE_CACHE_MAGIC);
+    out.extend_from_slice(&PIPELINE_CACHE_VERSION.to_le_bytes());
+    out.extend_from_slice(&info.vendor.to_le_bytes());
+    out.extend_from_slice(&info.device.to_le_bytes());
+    out.extend_from_slice(&pipeline_cache_driver_key(info).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    out.extend_from_slice(&stable_hash_bytes(data).to_le_bytes());
+    out.extend_from_slice(data);
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &out).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 fn device_required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
@@ -229,6 +309,16 @@ pub struct RendererConfig {
     ///
     /// Default: 128 MB. Override with `BLINC_GPU_MEMORY_BUDGET_MB` env var.
     pub gpu_memory_budget: u64,
+    /// Optional path to a persisted `PipelineCache` file. When set and the
+    /// adapter supports `Features::PIPELINE_CACHE`, the renderer seeds the
+    /// pipeline cache from this file (validated against the current adapter)
+    /// and writes it back after building the core pipelines, so every launch
+    /// after the first skips the bulk of pipeline (re)creation. Platform
+    /// runners point this at a per-app writable dir (e.g. the Android
+    /// internal data path). `None` disables the persisted cache.
+    ///
+    /// Default: `None`.
+    pub pipeline_cache_path: Option<std::path::PathBuf>,
 }
 
 impl Default for RendererConfig {
@@ -248,6 +338,7 @@ impl Default for RendererConfig {
             texture_format: None,
             unified_text_rendering: true, // Enabled for consistent transforms during animations
             gpu_memory_budget: budget_mb * 1024 * 1024,
+            pipeline_cache_path: None,
         }
     }
 }
@@ -2337,6 +2428,35 @@ impl GpuRenderer {
             source: wgpu::ShaderSource::Wgsl(sdf_notch_source.into()),
         });
 
+        // Persisted pipeline cache: seed from disk (validated against this
+        // adapter), feed it to pipeline creation, then write it back. Skips
+        // the bulk of pipeline (re)build on every launch after the first.
+        let adapter_info = adapter.get_info();
+        let pipeline_cache = if device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            let data = config
+                .pipeline_cache_path
+                .as_deref()
+                .and_then(|p| load_pipeline_cache_data(p, &adapter_info));
+            tracing::info!(
+                "Pipeline cache: {} ({} bytes)",
+                if data.is_some() { "loaded" } else { "cold" },
+                data.as_deref().map(<[u8]>::len).unwrap_or(0),
+            );
+            // SAFETY: `data`, when Some, is bytes we previously produced via
+            // `PipelineCache::get_data` and validated against this exact
+            // adapter in `load_pipeline_cache_data`. `fallback: true` also
+            // makes the driver ignore data it can't use.
+            Some(unsafe {
+                device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("Blinc Pipeline Cache"),
+                    data: data.as_deref(),
+                    fallback: true,
+                })
+            })
+        } else {
+            None
+        };
+
         // Create pipelines (core only — effect pipelines are lazy)
         let pipelines = Self::create_pipelines(
             &device,
@@ -2354,7 +2474,19 @@ impl GpuRenderer {
             texture_format,
             config.sample_count,
             has_vertex_storage,
+            pipeline_cache.as_ref(),
         );
+
+        // Persist the (now-populated) cache for the next launch. Best-effort.
+        if let (Some(cache), Some(path)) = (
+            pipeline_cache.as_ref(),
+            config.pipeline_cache_path.as_deref(),
+        ) {
+            if let Some(data) = cache.get_data() {
+                tracing::info!("Pipeline cache: saving {} bytes", data.len());
+                save_pipeline_cache_data(path, &adapter_info, &data);
+            }
+        }
 
         // Create buffers (storage buffers always created; DT textures added when needed)
         let buffers = Self::create_buffers(&device, &config, has_storage_buffers);
@@ -3248,6 +3380,7 @@ impl GpuRenderer {
         texture_format: wgpu::TextureFormat,
         sample_count: u32,
         has_vertex_storage: bool,
+        pipeline_cache: Option<&wgpu::PipelineCache>,
     ) -> Pipelines {
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -3318,7 +3451,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Overlay pipelines use sample_count=1 for rendering on resolved textures
@@ -3347,7 +3480,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: overlay_multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // --- Split SDF pipelines (share sdf_layout, same blend/primitive state) ---
@@ -3375,7 +3508,7 @@ impl GpuRenderer {
                 depth_stencil: None,
                 multisample: multisample_state,
                 multiview: None,
-                cache: None,
+                cache: pipeline_cache,
             });
             let overlay_label = format!("{label} Overlay");
             let overlay = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -3397,18 +3530,33 @@ impl GpuRenderer {
                 depth_stencil: None,
                 multisample: overlay_multisample_state,
                 multiview: None,
-                cache: None,
+                cache: pipeline_cache,
             });
             (msaa, overlay)
         };
 
-        let (sdf_core, sdf_core_overlay) =
-            make_sdf_pipeline_pair(sdf_core_shader, "SDF Core Pipeline");
-        let (sdf_shadow, sdf_shadow_overlay) =
-            make_sdf_pipeline_pair(sdf_shadow_shader, "SDF Shadow Pipeline");
-        let (sdf_3d, sdf_3d_overlay) = make_sdf_pipeline_pair(sdf_3d_shader, "SDF 3D Pipeline");
-        let (sdf_notch, sdf_notch_overlay) =
-            make_sdf_pipeline_pair(sdf_notch_shader, "SDF Notch Pipeline");
+        // Build the four SDF split pipeline pairs (8 pipelines) concurrently.
+        // Each `create_render_pipeline` is an independent, immutable-borrow
+        // driver call, so a scoped thread per pair overlaps the compilation.
+        let (
+            (sdf_core, sdf_core_overlay),
+            (sdf_shadow, sdf_shadow_overlay),
+            (sdf_3d, sdf_3d_overlay),
+            (sdf_notch, sdf_notch_overlay),
+        ) = std::thread::scope(|s| {
+            let h_core = s.spawn(|| make_sdf_pipeline_pair(sdf_core_shader, "SDF Core Pipeline"));
+            let h_shadow =
+                s.spawn(|| make_sdf_pipeline_pair(sdf_shadow_shader, "SDF Shadow Pipeline"));
+            let h_3d = s.spawn(|| make_sdf_pipeline_pair(sdf_3d_shader, "SDF 3D Pipeline"));
+            let h_notch =
+                s.spawn(|| make_sdf_pipeline_pair(sdf_notch_shader, "SDF Notch Pipeline"));
+            (
+                h_core.join().unwrap(),
+                h_shadow.join().unwrap(),
+                h_3d.join().unwrap(),
+                h_notch.join().unwrap(),
+            )
+        });
 
         // Text pipeline
         let text_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3440,7 +3588,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Text overlay pipeline - uses sample_count=1 for rendering on resolved textures
@@ -3463,7 +3611,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: overlay_multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Composite pipeline
@@ -3492,7 +3640,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Composite overlay pipeline - single-sampled for blending onto resolved textures
@@ -3515,7 +3663,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: overlay_multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Path pipeline - uses vertex buffers for tessellated geometry
@@ -3624,7 +3772,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Path overlay pipeline - uses sample_count=1 for rendering on resolved textures
@@ -3647,7 +3795,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: overlay_multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Layer composite pipeline - for compositing offscreen layers with blend modes
@@ -3703,7 +3851,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: overlay_multisample_state, // 1x sampled - layers are resolved
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // Compositor v2 scissored clear. No bindings, no vertex
@@ -3751,7 +3899,7 @@ impl GpuRenderer {
             depth_stencil: None,
             multisample: overlay_multisample_state,
             multiview: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         Pipelines {

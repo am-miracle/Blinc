@@ -331,6 +331,15 @@ impl AndroidApp {
         // Initialize the asset loader
         Self::init_asset_loader(app.clone());
 
+        // Persistent GPU pipeline-cache location (app-private storage). The
+        // first launch compiles ~18 Vulkan pipelines serially (the one-time
+        // "black screen" on cold install); wgpu::PipelineCache reloads them on
+        // subsequent launches. Borrowed here because `app` is mutably borrowed
+        // by `poll_events` inside the loop.
+        let pipeline_cache_path = app
+            .internal_data_path()
+            .map(|p| p.join("blinc_pipeline_cache.bin"));
+
         // Initialize the text measurer
         crate::text_measurer::init_text_measurer();
 
@@ -504,7 +513,7 @@ impl AndroidApp {
                                 let initializing_gpu = blinc_app.is_none();
 
                                 if initializing_gpu {
-                                    match Self::init_gpu(&window) {
+                                    match Self::init_gpu(&window, pipeline_cache_path.clone()) {
                                         Ok(app_instance) => {
                                             crate::text_measurer::init_text_measurer_with_registry(
                                                 app_instance.font_registry(),
@@ -1900,7 +1909,10 @@ impl AndroidApp {
     }
 
     /// Initialize GPU with a native window
-    fn init_gpu(window: &NativeWindow) -> Result<BlincApp> {
+    fn init_gpu(
+        window: &NativeWindow,
+        pipeline_cache_path: Option<std::path::PathBuf>,
+    ) -> Result<BlincApp> {
         use blinc_gpu::{GpuRenderer, RendererConfig, TextRenderingContext};
 
         Self::force_opaque_window_format(window);
@@ -1914,6 +1926,7 @@ impl AndroidApp {
             sample_count: 1,
             texture_format: None,
             unified_text_rendering: true,
+            pipeline_cache_path,
             ..RendererConfig::default()
         };
 
