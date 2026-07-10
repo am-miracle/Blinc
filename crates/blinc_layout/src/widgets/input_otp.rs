@@ -508,7 +508,9 @@ mod tests {
     use crate::event_handler::EventContext;
     use crate::stateful::TextFieldState;
     use crate::tree::LayoutNodeId;
-    use crate::widgets::text_input::{blur_all_text_inputs, process_pending_input_focus};
+    use crate::widgets::text_input::{
+        blur_all_text_inputs, focus_text_input, process_pending_input_focus,
+    };
 
     use super::*;
 
@@ -523,6 +525,18 @@ mod tests {
     fn reset_focus_for_test() {
         blur_all_text_inputs();
         process_pending_input_focus();
+    }
+
+    fn stateful_is_focused(slot: &SharedTextInputData) -> bool {
+        slot.lock()
+            .unwrap()
+            .stateful_state
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .state
+            .is_focused()
     }
 
     #[test]
@@ -656,6 +670,55 @@ mod tests {
 
         assert_eq!(slots[0].lock().unwrap().value, "7");
         assert!(slots[1].lock().unwrap().visual.is_focused());
+    }
+
+    #[test]
+    fn auto_advance_blurs_previous_slot_stateful_visuals() {
+        let _guard = OTP_FOCUS_TEST_LOCK.lock().unwrap();
+        reset_focus_for_test();
+        blinc_theme::ThemeState::init_default();
+
+        let value = test_state("");
+        let slots = Arc::new(vec![
+            text_input_data(),
+            text_input_data(),
+            text_input_data(),
+        ]);
+        let mut tree = LayoutTree::new();
+        let fields: Vec<_> = (0..slots.len())
+            .map(|index| {
+                wire_otp_slot(
+                    text_input(&slots[index]).max_length(1),
+                    index,
+                    &slots,
+                    true,
+                    &value,
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        for field in &fields {
+            field.build(&mut tree);
+        }
+
+        focus_text_input(&slots[0]);
+        let input_one =
+            EventContext::new(event_types::TEXT_INPUT, LayoutNodeId::default()).with_key_char('1');
+        fields[0].event_handlers().unwrap().dispatch(&input_one);
+        process_pending_input_focus();
+
+        let input_two =
+            EventContext::new(event_types::TEXT_INPUT, LayoutNodeId::default()).with_key_char('2');
+        fields[1].event_handlers().unwrap().dispatch(&input_two);
+        process_pending_input_focus();
+
+        assert!(!slots[0].lock().unwrap().visual.is_focused());
+        assert!(!slots[1].lock().unwrap().visual.is_focused());
+        assert!(slots[2].lock().unwrap().visual.is_focused());
+        assert!(!stateful_is_focused(&slots[0]));
+        assert!(!stateful_is_focused(&slots[1]));
+        assert!(stateful_is_focused(&slots[2]));
     }
 
     #[test]
