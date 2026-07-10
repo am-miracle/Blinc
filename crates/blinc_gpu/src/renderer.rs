@@ -3538,6 +3538,11 @@ impl GpuRenderer {
         // Build the four SDF split pipeline pairs (8 pipelines) concurrently.
         // Each `create_render_pipeline` is an independent, immutable-borrow
         // driver call, so a scoped thread per pair overlaps the compilation.
+        // Build the four SDF pipeline pairs in parallel on native (wgpu's
+        // handles are Send+Sync there); Vulkan drivers overlap the compiles,
+        // trimming cold first-launch pipeline build. wasm32 wgpu types are
+        // !Send (single-threaded), so build serially there.
+        #[cfg(not(target_arch = "wasm32"))]
         let (
             (sdf_core, sdf_core_overlay),
             (sdf_shadow, sdf_shadow_overlay),
@@ -3557,6 +3562,19 @@ impl GpuRenderer {
                 h_notch.join().unwrap(),
             )
         });
+
+        #[cfg(target_arch = "wasm32")]
+        let (
+            (sdf_core, sdf_core_overlay),
+            (sdf_shadow, sdf_shadow_overlay),
+            (sdf_3d, sdf_3d_overlay),
+            (sdf_notch, sdf_notch_overlay),
+        ) = (
+            make_sdf_pipeline_pair(sdf_core_shader, "SDF Core Pipeline"),
+            make_sdf_pipeline_pair(sdf_shadow_shader, "SDF Shadow Pipeline"),
+            make_sdf_pipeline_pair(sdf_3d_shader, "SDF 3D Pipeline"),
+            make_sdf_pipeline_pair(sdf_notch_shader, "SDF Notch Pipeline"),
+        );
 
         // Text pipeline
         let text_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

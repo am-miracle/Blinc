@@ -2813,6 +2813,9 @@ impl WindowedApp {
         // running, so the two paths are mutually exclusive.
         match animation_thread_mode {
             blinc_platform::AnimationThreadMode::Background => {
+                // wasm32 has no background thread — animations tick via
+                // requestAnimationFrame — so this is a no-op there.
+                #[cfg(not(target_arch = "wasm32"))]
                 scheduler.start_background();
             }
             blinc_platform::AnimationThreadMode::Main => {
