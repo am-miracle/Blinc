@@ -244,14 +244,7 @@ impl AndroidApp {
         );
 
         wgpu::SurfaceConfiguration {
-            // COPY_DST is required by the layer compositor fast path
-            // (`try_render_with_compositor` blits the cached static layer
-            // onto the surface via `copy_texture_to_texture`); COPY_SRC
-            // mirrors the desktop surface config. Without COPY_DST the
-            // encoder validation fails ("Encoder is invalid") and aborts.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width,
             height,
@@ -1759,25 +1752,12 @@ impl AndroidApp {
                                 );
                             }
                             let view = output.texture.create_view(&Default::default());
-                            // Route through the layer-compositor fast path
-                            // (same as the desktop runner): the static UI is
-                            // rasterized once into a cached texture, then every
-                            // subsequent frame is a single blit + canvas
-                            // re-dispatch instead of a full paint-walker pass.
-                            // Passing `Some(&output.texture)` + fast_paint=true
-                            // is what selects `try_render_with_compositor`;
-                            // the previous `render_tree_with_motion` call passed
-                            // `target_texture = None`, forcing the expensive
-                            // full walker on every frame (~28 ms → ~35 fps even
-                            // idle on a 120 Hz panel).
-                            if let Err(e) = app_instance.render_tree_with_motion_opt(
+                            if let Err(e) = app_instance.render_tree_with_motion(
                                 tree,
                                 rs,
                                 &view,
-                                Some(&output.texture),
                                 config.width,
                                 config.height,
-                                true,
                             ) {
                                 tracing::error!("Render error: {}", e);
                             }
