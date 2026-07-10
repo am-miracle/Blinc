@@ -12,7 +12,8 @@
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|colorMode|fontScale|locale|layoutDirection|touchscreen|mcc|mnc"
             android:exported="true">
 
             <meta-data
