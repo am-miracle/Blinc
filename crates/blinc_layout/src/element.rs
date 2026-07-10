@@ -1450,6 +1450,15 @@ impl RenderProps {
         if other.outline_offset != 0.0 {
             self.outline_offset = other.outline_offset;
         }
+        // Override cursor if set. Same rationale as outline above: without
+        // it, a Stateful's `queue_prop_update` path wipes the cursor back to
+        // the OS arrow on every state transition (the on_state callback sets
+        // `.cursor(...)` on its Div, but merge_from didn't carry it over), so
+        // a `stateful_button().cursor(Pointer)` reverted to Default the moment
+        // the pointer moved and drove a hover transition. See issue #55.
+        if other.cursor.is_some() {
+            self.cursor = other.cursor;
+        }
     }
 }
 
@@ -1652,5 +1661,38 @@ impl Default for ResolvedRenderProps {
             clips_content: false,
             overflow_fade: OverflowFade::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod merge_from_tests {
+    use super::{CursorStyle, RenderProps};
+
+    // Regression for issue #55: a `stateful_button().cursor(Pointer)` lost its
+    // cursor the moment the pointer moved. The state-callback path builds
+    // `final_props = base_props; final_props.merge_from(&callback_props)` and
+    // `merge_from` never carried `cursor`, so the queued prop update reset the
+    // node's cursor to the OS arrow on every hover/press transition.
+    #[test]
+    fn merge_from_carries_callback_cursor() {
+        let mut base = RenderProps::default();
+        let callback = RenderProps {
+            cursor: Some(CursorStyle::Pointer),
+            ..Default::default()
+        };
+        base.merge_from(&callback);
+        assert_eq!(base.cursor, Some(CursorStyle::Pointer));
+    }
+
+    // An unset callback cursor must not clobber a cursor already on the base
+    // (mirrors how the other optional visual props merge).
+    #[test]
+    fn merge_from_keeps_base_cursor_when_callback_unset() {
+        let mut base = RenderProps {
+            cursor: Some(CursorStyle::Text),
+            ..Default::default()
+        };
+        base.merge_from(&RenderProps::default());
+        assert_eq!(base.cursor, Some(CursorStyle::Text));
     }
 }
