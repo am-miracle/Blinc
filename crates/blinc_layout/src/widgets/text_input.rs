@@ -339,13 +339,10 @@ static FOCUSED_TEXT_AREA: Mutex<Option<Weak<Mutex<crate::widgets::text_area::Tex
     Mutex::new(None);
 
 /// Push a text_area onto the deferred-focus queue.
-///
-/// Companion to [`focus_text_input_deferred`] — `focus_text_area_deferred`
-/// (in `text_area.rs`) delegates to this so the static lives in one
-/// place. See [`focus_text_input_deferred`] for the timing rationale.
 pub fn enqueue_pending_focus_area(state: Weak<Mutex<crate::widgets::text_area::TextAreaState>>) {
+    let generation = PENDING_FOCUS_GENERATION.load(Ordering::Relaxed);
     if let Ok(mut pending) = PENDING_FOCUS_AREA.lock() {
-        pending.push(state);
+        pending.push((generation, state));
     }
     crate::stateful::request_redraw();
 }
@@ -369,9 +366,12 @@ pub fn enqueue_pending_focus_area(state: Weak<Mutex<crate::widgets::text_area::T
 /// recording). Deferring focus until AFTER mount means the popover
 /// settles in the tree first, then focus side-effects apply against a
 /// stable composition.
-static PENDING_FOCUS_INPUT: Mutex<Vec<Weak<Mutex<TextInputData>>>> = Mutex::new(Vec::new());
-static PENDING_FOCUS_AREA: Mutex<Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>>> =
-    Mutex::new(Vec::new());
+static PENDING_FOCUS_INPUT: Mutex<Vec<(u64, Weak<Mutex<TextInputData>>)>> = Mutex::new(Vec::new());
+/// Bumped by [`blur_all_text_inputs`] to cancel deferred focus queued before blur.
+static PENDING_FOCUS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PENDING_FOCUS_AREA: Mutex<
+    Vec<(u64, Weak<Mutex<crate::widgets::text_area::TextAreaState>>)>,
+> = Mutex::new(Vec::new());
 
 /// Callback for setting continuous redraw on the animation scheduler
 /// This is set by the windowed app to bridge text widgets with the animation system
@@ -671,29 +671,35 @@ pub fn refresh_text_input(state: &SharedTextInputData) {
 /// Pair with the regular [`focus_text_input`] for non-overlay
 /// scenarios where the input is already in the tree.
 pub fn focus_text_input_deferred(state: &SharedTextInputData) {
+    let generation = PENDING_FOCUS_GENERATION.load(Ordering::Relaxed);
     if let Ok(mut pending) = PENDING_FOCUS_INPUT.lock() {
-        pending.push(Arc::downgrade(state));
+        pending.push((generation, Arc::downgrade(state)));
     }
     crate::stateful::request_redraw();
 }
 
 /// Drain the pending-focus queue, applying focus to entries whose
 /// widget has mounted (stateful_state populated). Entries whose widget
-/// hasn't built yet are re-queued for the next frame.
+/// hasn't built yet are re-queued for the next frame. Entries with a
+/// stale generation (blurred before they drained) are dropped.
 ///
 /// Called by the windowed frame loop AFTER tree-build phase (after
 /// `rebuild_overlay_subtree_if_dirty`) but BEFORE paint, so the focus
 /// state flip is visible on the same frame the popover paints — no
 /// visual delay between popover appearance and focus indicator.
 pub fn process_pending_input_focus() {
-    let drained: Vec<Weak<Mutex<TextInputData>>> = {
+    let drained: Vec<(u64, Weak<Mutex<TextInputData>>)> = {
         match PENDING_FOCUS_INPUT.lock() {
             Ok(mut p) => std::mem::take(&mut *p),
             Err(_) => return,
         }
     };
-    let mut requeue: Vec<Weak<Mutex<TextInputData>>> = Vec::new();
-    for weak in drained {
+    let current_generation = PENDING_FOCUS_GENERATION.load(Ordering::Relaxed);
+    let mut requeue: Vec<(u64, Weak<Mutex<TextInputData>>)> = Vec::new();
+    for (generation, weak) in drained {
+        if generation != current_generation {
+            continue;
+        }
         let Some(strong) = weak.upgrade() else {
             continue;
         };
@@ -705,7 +711,7 @@ pub fn process_pending_input_focus() {
         if mounted {
             focus_text_input(&strong);
         } else {
-            requeue.push(Arc::downgrade(&strong));
+            requeue.push((generation, Arc::downgrade(&strong)));
         }
     }
     if !requeue.is_empty() {
@@ -720,14 +726,18 @@ pub fn process_pending_input_focus() {
 /// frame loop calls both back-to-back; either covers its own widget
 /// type and the other is a no-op for empty queues.
 pub fn process_pending_area_focus() {
-    let drained: Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>> = {
+    let drained: Vec<(u64, Weak<Mutex<crate::widgets::text_area::TextAreaState>>)> = {
         match PENDING_FOCUS_AREA.lock() {
             Ok(mut p) => std::mem::take(&mut *p),
             Err(_) => return,
         }
     };
-    let mut requeue: Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>> = Vec::new();
-    for weak in drained {
+    let current_generation = PENDING_FOCUS_GENERATION.load(Ordering::Relaxed);
+    let mut requeue: Vec<(u64, Weak<Mutex<crate::widgets::text_area::TextAreaState>>)> = Vec::new();
+    for (generation, weak) in drained {
+        if generation != current_generation {
+            continue;
+        }
         let Some(strong) = weak.upgrade() else {
             continue;
         };
@@ -739,7 +749,7 @@ pub fn process_pending_area_focus() {
         if mounted {
             crate::widgets::text_area::focus_text_area(&strong);
         } else {
-            requeue.push(Arc::downgrade(&strong));
+            requeue.push((generation, Arc::downgrade(&strong)));
         }
     }
     if !requeue.is_empty() {
@@ -811,25 +821,44 @@ pub fn focus_text_input(state: &SharedTextInputData) {
 }
 
 pub(crate) fn set_focused_text_input(state: &SharedTextInputData) {
-    use blinc_core::events::event_types;
-
     let mut focused = FOCUSED_TEXT_INPUT.lock().unwrap();
 
     if let Some(weak) = focused.take() {
         if let Some(prev_state) = weak.upgrade() {
             if !Arc::ptr_eq(&prev_state, state) {
-                if let Ok(mut s) = prev_state.lock() {
-                    if let Some(new_state) = s.visual.on_event(event_types::BLUR) {
-                        s.visual = new_state;
-                        decrement_focus_count();
-                    }
-                }
+                blur_text_input_state(&prev_state);
             }
         }
     }
 
     blur_focused_text_area();
     *focused = Some(Arc::downgrade(state));
+}
+
+fn blur_text_input_state(state: &SharedTextInputData) {
+    use blinc_core::events::event_types;
+
+    let mut stateful_to_refresh = None;
+    if let Ok(mut s) = state.lock() {
+        if let Some(new_state) = s.visual.on_event(event_types::BLUR) {
+            s.visual = new_state;
+            decrement_focus_count();
+        }
+
+        if let Some(ref stateful) = s.stateful_state {
+            if let Ok(mut shared) = stateful.lock() {
+                if let Some(new_fsm) = shared.state.on_event(event_types::BLUR) {
+                    shared.state = new_fsm;
+                    shared.needs_visual_update = true;
+                    stateful_to_refresh = Some(Arc::clone(stateful));
+                }
+            }
+        }
+    }
+
+    if let Some(ref stateful) = stateful_to_refresh {
+        refresh_stateful(stateful);
+    }
 }
 
 pub(crate) fn clear_focused_text_input(state: &SharedTextInputData) {
@@ -844,18 +873,11 @@ pub(crate) fn clear_focused_text_input(state: &SharedTextInputData) {
 }
 
 pub(crate) fn set_focused_text_area(state: &crate::widgets::text_area::SharedTextAreaState) {
-    use blinc_core::events::event_types;
-
     {
         let mut focused = FOCUSED_TEXT_INPUT.lock().unwrap();
         if let Some(weak) = focused.take() {
             if let Some(prev_state) = weak.upgrade() {
-                if let Ok(mut s) = prev_state.lock() {
-                    if let Some(new_state) = s.visual.on_event(event_types::BLUR) {
-                        s.visual = new_state;
-                        decrement_focus_count();
-                    }
-                }
+                blur_text_input_state(&prev_state);
             }
         }
     }
@@ -865,16 +887,37 @@ pub(crate) fn set_focused_text_area(state: &crate::widgets::text_area::SharedTex
         if let Some(weak) = focused.take() {
             if let Some(prev_state) = weak.upgrade() {
                 if !Arc::ptr_eq(&prev_state, state) {
-                    if let Ok(mut s) = prev_state.lock() {
-                        if let Some(new_state) = s.visual.on_event(event_types::BLUR) {
-                            s.visual = new_state;
-                            decrement_focus_count();
-                        }
-                    }
+                    blur_text_area_state(&prev_state);
                 }
             }
         }
         *focused = Some(Arc::downgrade(state));
+    }
+}
+
+fn blur_text_area_state(state: &crate::widgets::text_area::SharedTextAreaState) {
+    use blinc_core::events::event_types;
+
+    let mut stateful_to_refresh = None;
+    if let Ok(mut s) = state.lock() {
+        if let Some(new_state) = s.visual.on_event(event_types::BLUR) {
+            s.visual = new_state;
+            decrement_focus_count();
+        }
+
+        if let Some(ref stateful) = s.stateful_state {
+            if let Ok(mut shared) = stateful.lock() {
+                if let Some(new_fsm) = shared.state.on_event(event_types::BLUR) {
+                    shared.state = new_fsm;
+                    shared.needs_visual_update = true;
+                    stateful_to_refresh = Some(Arc::clone(stateful));
+                }
+            }
+        }
+    }
+
+    if let Some(ref stateful) = stateful_to_refresh {
+        refresh_stateful(stateful);
     }
 }
 
@@ -890,17 +933,10 @@ pub(crate) fn clear_focused_text_area(state: &crate::widgets::text_area::SharedT
 }
 
 fn blur_focused_text_area() {
-    use blinc_core::events::event_types;
-
     let mut focused = FOCUSED_TEXT_AREA.lock().unwrap();
     if let Some(weak) = focused.take() {
         if let Some(prev_state) = weak.upgrade() {
-            if let Ok(mut s) = prev_state.lock() {
-                if let Some(new_state) = s.visual.on_event(event_types::BLUR) {
-                    s.visual = new_state;
-                    decrement_focus_count();
-                }
-            }
+            blur_text_area_state(&prev_state);
         }
     }
 }
@@ -910,6 +946,9 @@ fn blur_focused_text_area() {
 pub fn blur_all_text_inputs() {
     use crate::stateful::refresh_stateful;
     use blinc_core::events::event_types;
+
+    // Invalidate any not-yet-drained deferred focus request.
+    PENDING_FOCUS_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     // Run any registered generic-editable blur callback first so
     // widgets that don't fit the typed `text_input` / `text_area`
@@ -3655,5 +3694,71 @@ mod tests {
         let style = tree.get_style(root).unwrap();
 
         assert_eq!(style.size.width, Dimension::Length(42.0));
+    }
+
+    // Global focus statics (PENDING_FOCUS_INPUT, FOCUSED_TEXT_INPUT, ...)
+    // are process-wide, so serialize tests that touch them.
+    static FOCUS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn blur_cancels_a_pending_deferred_focus() {
+        let _guard = FOCUS_TEST_LOCK.lock().unwrap();
+        ensure_theme_initialized();
+        blur_all_text_inputs();
+
+        let data = text_input_data();
+        let mut tree = LayoutTree::new();
+        let _root = text_input(&data).build(&mut tree);
+
+        // Auto-advance queues a re-focus (e.g. OTP typing the last
+        // digit), then the user clicks outside before it drains.
+        focus_text_input_deferred(&data);
+        blur_all_text_inputs();
+        process_pending_input_focus();
+
+        assert!(!data.lock().unwrap().visual.is_focused());
+    }
+
+    #[test]
+    fn deferred_focus_applies_without_an_intervening_blur() {
+        let _guard = FOCUS_TEST_LOCK.lock().unwrap();
+        ensure_theme_initialized();
+        blur_all_text_inputs();
+
+        let data = text_input_data();
+        let mut tree = LayoutTree::new();
+        let _root = text_input(&data).build(&mut tree);
+
+        focus_text_input_deferred(&data);
+        process_pending_input_focus();
+
+        assert!(data.lock().unwrap().visual.is_focused());
+    }
+
+    #[test]
+    fn focusing_another_input_blurs_previous_stateful_visual_state() {
+        let _guard = FOCUS_TEST_LOCK.lock().unwrap();
+        ensure_theme_initialized();
+        blur_all_text_inputs();
+
+        let first = text_input_data();
+        let second = text_input_data();
+        let mut tree = LayoutTree::new();
+        let _first_root = text_input(&first).build(&mut tree);
+        let _second_root = text_input(&second).build(&mut tree);
+
+        focus_text_input(&first);
+        focus_text_input(&second);
+
+        let first_stateful = first
+            .lock()
+            .unwrap()
+            .stateful_state
+            .as_ref()
+            .unwrap()
+            .clone();
+
+        assert!(!first.lock().unwrap().visual.is_focused());
+        assert!(!first_stateful.lock().unwrap().state.is_focused());
     }
 }
