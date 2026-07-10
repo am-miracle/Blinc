@@ -466,6 +466,12 @@ impl AndroidApp {
         let mut last_touch_x: Option<f32> = None;
         let mut last_touch_y: Option<f32> = None;
         let mut is_scrolling = false;
+        // Down position + move count for the current gesture, used to tell a
+        // real tap (stationary, no moves) from a short/fast flick (which moves
+        // but may not trip the per-move `is_scrolling` threshold). Only a true
+        // tap should grab-to-stop a coast.
+        let mut gesture_down: Option<(f32, f32)> = None;
+        let mut gesture_moves: u32 = 0;
         let mut pinch_state = PinchState::default();
 
         tracing::info!("Entering Android event loop");
@@ -637,23 +643,36 @@ impl AndroidApp {
                                     (&blinc_app, &surface, &mut surface_config)
                                 {
                                     if width > 0 && height > 0 {
+                                        // Android emits a WindowResized on every
+                                        // resume even when the dimensions are
+                                        // unchanged. Only the actual-size-change
+                                        // case needs a full UI rebuild; a same-size
+                                        // resume just reconfigures the swapchain and
+                                        // repaints the preserved tree. Rebuilding
+                                        // unconditionally reconstructed the entire UI
+                                        // (and flashed) on every resume.
+                                        let size_changed =
+                                            config.width != width || config.height != height;
                                         config.width = width;
                                         config.height = height;
                                         surf.configure(app_instance.device(), config);
 
-                                        if let Some(ref mut windowed_ctx) = ctx {
-                                            let scale_factor = windowed_ctx.scale_factor;
-                                            windowed_ctx.width = width as f32 / scale_factor as f32;
-                                            windowed_ctx.height =
-                                                height as f32 / scale_factor as f32;
+                                        if size_changed {
+                                            if let Some(ref mut windowed_ctx) = ctx {
+                                                let scale_factor = windowed_ctx.scale_factor;
+                                                windowed_ctx.width =
+                                                    width as f32 / scale_factor as f32;
+                                                windowed_ctx.height =
+                                                    height as f32 / scale_factor as f32;
 
-                                            BlincContextState::get().set_viewport_size(
-                                                windowed_ctx.width,
-                                                windowed_ctx.height,
-                                            );
+                                                BlincContextState::get().set_viewport_size(
+                                                    windowed_ctx.width,
+                                                    windowed_ctx.height,
+                                                );
+                                            }
+                                            needs_rebuild = true;
                                         }
-
-                                        needs_rebuild = true;
+                                        needs_redraw_next_frame = true;
                                     }
                                 }
                             }
@@ -730,6 +749,11 @@ impl AndroidApp {
             let mut scroll_info: Option<(f32, f32, f32, f32)> = None;
             // Track if touch ended (for scroll physics)
             let mut touch_ended = false;
+            // A tap — touch up WITHOUT any drag — requests grab-to-stop of a
+            // coasting list. A swipe must NOT stop momentum (it should carry
+            // and accumulate across successive flicks), so this is set only on
+            // a no-move release, carrying the up coords for a post-loop hit test.
+            let mut tap_to_stop: Option<(f32, f32)> = None;
 
             if let (Some(windowed_ctx), Some(tree)) = (&mut ctx, &mut render_tree) {
                 // Get the scale factor for coordinate conversion
@@ -877,6 +901,8 @@ impl AndroidApp {
                                                     last_touch_x = Some(lx);
                                                     last_touch_y = Some(ly);
                                                     is_scrolling = false;
+                                                    gesture_down = Some((lx, ly));
+                                                    gesture_moves = 0;
                                                 }
                                                 // Update pending events with coordinates
                                                 unsafe {
@@ -892,6 +918,7 @@ impl AndroidApp {
                                                 router.on_mouse_move(&*tree, lx, ly);
 
                                                 if pointer_count == 1 {
+                                                    gesture_moves += 1;
                                                     // Calculate scroll delta from touch movement
                                                     // Touch: dragging down = positive delta = content scrolls up (shows below)
                                                     if let (Some(prev_x), Some(prev_y)) =
@@ -904,9 +931,27 @@ impl AndroidApp {
                                                         // Small threshold to avoid jitter
                                                         if delta_x.abs() > 0.5 || delta_y.abs() > 0.5 {
                                                             is_scrolling = true;
-                                                            // Store scroll info for dispatch after event loop
-                                                            scroll_info =
-                                                                Some((lx, ly, delta_x, delta_y));
+                                                            // ACCUMULATE across every move this
+                                                            // frame. `poll_events` drains many
+                                                            // MotionAction::Move events per loop
+                                                            // (touch samples at 120-240 Hz vs a
+                                                            // ~35 fps loop), and each delta is
+                                                            // from the previous move. Overwriting
+                                                            // dropped all but the last, so the
+                                                            // content moved a fraction of the
+                                                            // finger distance — the "scroll is
+                                                            // slow / slower than desktop" report.
+                                                            // Summing applies the full gesture and
+                                                            // gives the physics the true velocity.
+                                                            let (ax, ay) = scroll_info
+                                                                .map(|(_, _, dx, dy)| (dx, dy))
+                                                                .unwrap_or((0.0, 0.0));
+                                                            scroll_info = Some((
+                                                                lx,
+                                                                ly,
+                                                                ax + delta_x,
+                                                                ay + delta_y,
+                                                            ));
                                                             tracing::trace!(
                                                                 "Touch scroll: delta=({:.1}, {:.1})",
                                                                 delta_x,
@@ -943,14 +988,32 @@ impl AndroidApp {
                                                 windowed_ctx.pointer_query.set_pressure(0.0);
                                                 router.on_mouse_up(&*tree, lx, ly, MouseButton::Left);
 
-                                                // Mark touch ended for scroll physics
-                                                if is_scrolling {
+                                                // Classify: only a real TAP — essentially
+                                                // stationary (no scroll flag, ≤1 move, tiny
+                                                // total displacement) — grabs-to-stop a coast.
+                                                // A short or fast flick moves enough to be a
+                                                // SWIPE and must keep/continue its momentum.
+                                                let displacement = gesture_down
+                                                    .map(|(dx, dy)| {
+                                                        ((lx - dx).powi(2) + (ly - dy).powi(2))
+                                                            .sqrt()
+                                                    })
+                                                    .unwrap_or(0.0);
+                                                const TAP_SLOP: f32 = 12.0;
+                                                let is_tap = !is_scrolling
+                                                    && gesture_moves <= 1
+                                                    && displacement < TAP_SLOP;
+                                                if is_tap {
+                                                    tap_to_stop = Some((lx, ly));
+                                                } else {
                                                     touch_ended = true;
                                                 }
                                                 // Clear touch tracking
                                                 last_touch_x = None;
                                                 last_touch_y = None;
                                                 is_scrolling = false;
+                                                gesture_down = None;
+                                                gesture_moves = 0;
 
                                                 unsafe {
                                                     let events = &mut pending_events
@@ -1143,6 +1206,18 @@ impl AndroidApp {
                             false, // alt
                             false, // meta
                         );
+                    }
+                }
+            }
+
+            // Grab-to-stop, TAP ONLY: a no-move release on a coasting list
+            // halts it (native "tap to stop"). A swipe deliberately does not
+            // land here — its momentum carries and accumulates across flicks.
+            if let Some((tap_x, tap_y)) = tap_to_stop {
+                if let (Some(windowed_ctx), Some(tree)) = (&mut ctx, &mut render_tree) {
+                    let router = &mut windowed_ctx.event_router;
+                    if let Some(hit) = router.hit_test(tree, tap_x, tap_y) {
+                        tree.cancel_scroll_animation_in_chain(hit.node, &hit.ancestors);
                     }
                 }
             }
