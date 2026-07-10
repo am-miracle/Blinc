@@ -3803,7 +3803,22 @@ impl<S: StateTransitions> Stateful<S> {
 
     /// Helper to update inner Div with RefCell using merge
     fn merge_into_inner(&self, props: Div) {
+        // Container-level visual props chained AFTER `.on_state(...)` must
+        // still seed the base so they persist across state transitions.
+        // `on_state` snapshots `base_render_props` at the moment it runs, so a
+        // trailing `.cursor(Pointer)` / `.bg(...)` on the Stateful would
+        // otherwise be dropped on the first hover/press refresh (the refresh
+        // rebuilds from base + the on_state callback). The base seeds each
+        // refresh; the on_state inner div still overrides via `merge_from`.
+        // Layout-only builders (`.w()`, `.p()`, …) carry no `RenderProps`, so
+        // their delta is all-default and folds to a no-op here. (Issue #55.)
+        let delta_props = props.render_props();
         self.inner.borrow_mut().merge(props);
+        if let Ok(mut guard) = self.shared_state.lock() {
+            if let Some(base) = guard.base_render_props.as_mut() {
+                base.merge_from(&delta_props);
+            }
+        }
     }
 
     /// Set width (builder pattern)
@@ -5271,6 +5286,28 @@ mod tests {
 
         let changed = elem.dispatch_state(ButtonState::Hovered);
         assert!(!changed);
+    }
+
+    // Issue #55: a container-level `.cursor(...)` chained AFTER `.on_state(...)`
+    // must seed base_render_props, so the cursor persists across the state
+    // refreshes (which rebuild from base + the on_state callback). Before the
+    // fix, on_state snapshotted the base before this builder ran, so the
+    // trailing cursor was dropped on the first hover and reset to the OS arrow.
+    #[test]
+    fn container_cursor_after_on_state_seeds_base_props() {
+        use crate::element::CursorStyle;
+        let elem = stateful_button()
+            .on_state(|_state, div| {
+                // Inner div does NOT set a cursor — the container's must persist.
+                *div = div.swap().bg(Color::RED);
+            })
+            .cursor(CursorStyle::Pointer);
+
+        let guard = elem.shared_state.lock().unwrap();
+        assert_eq!(
+            guard.base_render_props.as_ref().and_then(|p| p.cursor),
+            Some(CursorStyle::Pointer),
+        );
     }
 
     #[test]
