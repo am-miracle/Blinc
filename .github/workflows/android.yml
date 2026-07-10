@@ -69,8 +69,12 @@ jobs:
           [ -n "$SDKMANAGER" ] || { echo "::error::sdkmanager not found under $ANDROID_HOME"; exit 1; }
           echo "Using sdkmanager: $SDKMANAGER"
           for attempt in 1 2 3 4; do
-            if yes | "$SDKMANAGER" "ndk;${NDK_VER}" \
-                && [ -d "$ANDROID_HOME/ndk/${NDK_VER}/toolchains" ]; then
+            # `yes` feeds license prompts; it takes SIGPIPE once sdkmanager
+            # stops reading (harmless "Broken pipe" that pipefail would
+            # otherwise treat as failure), so swallow the pipe status and
+            # judge success by the installed toolchains dir instead.
+            yes 2>/dev/null | "$SDKMANAGER" "ndk;${NDK_VER}" || true
+            if [ -d "$ANDROID_HOME/ndk/${NDK_VER}/toolchains" ]; then
               echo "NDK ${NDK_VER} installed on attempt ${attempt}"
               exit 0
             fi
