@@ -221,6 +221,22 @@ impl RenderTree {
         true
     }
 
+    /// True if `child_node_id`'s stored topology hash no longer matches
+    /// `child_builder`'s. Shared by the generic and boxed `analyze_changes`
+    /// variants, which both need to detect a same-shaped reorder (equal
+    /// tree hash length, different child identity) and bail out to a full
+    /// children rebuild rather than diffing positionally.
+    fn child_topology_changed(
+        &self,
+        child_builder: &dyn ElementBuilder,
+        child_node_id: LayoutNodeId,
+    ) -> bool {
+        let child_topology = DivHash::compute_topology_tree(child_builder);
+        self.node_hashes
+            .get(&child_node_id)
+            .is_none_or(|&(_, _, stored_topology)| stored_topology != child_topology)
+    }
+
     /// Analyze what categories of changes occurred between stored tree and new element
     pub(crate) fn analyze_changes<E: ElementBuilder>(
         &self,
@@ -287,12 +303,7 @@ impl RenderTree {
 
         // Recursively check children
         for (child_builder, &child_node_id) in child_builders.iter().zip(child_node_ids.iter()) {
-            let child_topology = DivHash::compute_topology_tree(child_builder.as_ref());
-            if self
-                .node_hashes
-                .get(&child_node_id)
-                .is_none_or(|&(_, _, stored_topology)| stored_topology != child_topology)
-            {
+            if self.child_topology_changed(child_builder.as_ref(), child_node_id) {
                 changes.children = true;
                 return changes;
             }
@@ -362,12 +373,7 @@ impl RenderTree {
         }
 
         for (child_builder, &child_node_id) in child_builders.iter().zip(child_node_ids.iter()) {
-            let child_topology = DivHash::compute_topology_tree(child_builder.as_ref());
-            if self
-                .node_hashes
-                .get(&child_node_id)
-                .is_none_or(|&(_, _, stored_topology)| stored_topology != child_topology)
-            {
+            if self.child_topology_changed(child_builder.as_ref(), child_node_id) {
                 changes.children = true;
                 return changes;
             }

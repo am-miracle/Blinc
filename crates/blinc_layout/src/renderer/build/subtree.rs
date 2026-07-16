@@ -35,6 +35,29 @@ use crate::tree::LayoutNodeId;
 use super::super::RenderTree;
 
 impl RenderTree {
+    /// True if any slot in `child_builders`/`child_node_ids` has a topology
+    /// hash that no longer matches the stored one for that node.
+    ///
+    /// Equal child counts do not imply equal child identity — a same-shaped
+    /// reorder still needs a rebuild so ids, handlers, and other node-keyed
+    /// state cannot remain attached positionally. Shared by the generic and
+    /// boxed `rebuild_changed_subtrees` variants below.
+    fn any_child_topology_changed(
+        &self,
+        child_builders: &[Box<dyn ElementBuilder>],
+        child_node_ids: &[LayoutNodeId],
+    ) -> bool {
+        child_builders
+            .iter()
+            .zip(child_node_ids.iter())
+            .any(|(child, child_id)| {
+                let new_topology = DivHash::compute_topology_tree(child.as_ref());
+                self.node_hashes
+                    .get(child_id)
+                    .is_none_or(|&(_, _, stored_topology)| stored_topology != new_topology)
+            })
+    }
+
     /// Rebuild subtrees for nodes with changed children
     ///
     /// This walks the tree comparing stored hashes with the new element tree.
@@ -54,19 +77,7 @@ impl RenderTree {
             return;
         }
 
-        // Equal counts do not imply equal child identity. If any slot's
-        // topology changed, rebuild this parent's children so ids, handlers,
-        // and other node-keyed state cannot remain attached positionally.
-        if child_builders
-            .iter()
-            .zip(child_node_ids.iter())
-            .any(|(child, child_id)| {
-                let new_topology = DivHash::compute_topology_tree(child.as_ref());
-                self.node_hashes
-                    .get(child_id)
-                    .is_none_or(|&(_, _, stored_topology)| stored_topology != new_topology)
-            })
-        {
+        if self.any_child_topology_changed(child_builders, &child_node_ids) {
             self.rebuild_children_in_place(node_id, child_builders);
             return;
         }
@@ -110,16 +121,7 @@ impl RenderTree {
             return;
         }
 
-        if child_builders
-            .iter()
-            .zip(child_node_ids.iter())
-            .any(|(child, child_id)| {
-                let new_topology = DivHash::compute_topology_tree(child.as_ref());
-                self.node_hashes
-                    .get(child_id)
-                    .is_none_or(|&(_, _, stored_topology)| stored_topology != new_topology)
-            })
-        {
+        if self.any_child_topology_changed(child_builders, &child_node_ids) {
             self.rebuild_children_in_place(node_id, child_builders);
             return;
         }
