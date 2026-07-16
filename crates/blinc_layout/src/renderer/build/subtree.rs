@@ -54,10 +54,27 @@ impl RenderTree {
             return;
         }
 
+        // Equal counts do not imply equal child identity. If any slot's
+        // topology changed, rebuild this parent's children so ids, handlers,
+        // and other node-keyed state cannot remain attached positionally.
+        if child_builders
+            .iter()
+            .zip(child_node_ids.iter())
+            .any(|(child, child_id)| {
+                let new_topology = DivHash::compute_topology_tree(child.as_ref());
+                self.node_hashes
+                    .get(child_id)
+                    .is_none_or(|&(_, _, stored_topology)| stored_topology != new_topology)
+            })
+        {
+            self.rebuild_children_in_place(node_id, child_builders);
+            return;
+        }
+
         // Same child count - check each child for deeper changes
         for (child_builder, &child_node_id) in child_builders.iter().zip(child_node_ids.iter()) {
             // Get stored hash for this child
-            if let Some(&(_, stored_tree_hash)) = self.node_hashes.get(&child_node_id) {
+            if let Some(&(_, stored_tree_hash, _)) = self.node_hashes.get(&child_node_id) {
                 let new_tree_hash = DivHash::compute_element_tree(child_builder.as_ref());
                 if stored_tree_hash != new_tree_hash {
                     // Child's subtree changed - check if it's the child count or deeper changes
@@ -93,8 +110,22 @@ impl RenderTree {
             return;
         }
 
+        if child_builders
+            .iter()
+            .zip(child_node_ids.iter())
+            .any(|(child, child_id)| {
+                let new_topology = DivHash::compute_topology_tree(child.as_ref());
+                self.node_hashes
+                    .get(child_id)
+                    .is_none_or(|&(_, _, stored_topology)| stored_topology != new_topology)
+            })
+        {
+            self.rebuild_children_in_place(node_id, child_builders);
+            return;
+        }
+
         for (child_builder, &child_node_id) in child_builders.iter().zip(child_node_ids.iter()) {
-            if let Some(&(_, stored_tree_hash)) = self.node_hashes.get(&child_node_id) {
+            if let Some(&(_, stored_tree_hash, _)) = self.node_hashes.get(&child_node_id) {
                 let new_tree_hash = DivHash::compute_element_tree(child_builder.as_ref());
                 if stored_tree_hash != new_tree_hash {
                     let child_children_count = self.layout_tree.children(child_node_id).len();
