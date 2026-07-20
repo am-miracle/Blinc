@@ -2954,6 +2954,29 @@ mod tests {
     }
 
     #[test]
+    fn incremental_update_refreshes_classes_on_reused_keyed_survivor() {
+        let initial = div()
+            .child(div().id("alice").class("row"))
+            .child(div().id("bob").class("row"));
+        let mut tree = RenderTree::from_element(&initial);
+        let root = tree.root().unwrap();
+        let bob = tree.layout_tree.children(root)[1];
+
+        let updated = div()
+            .child(div().id("carol").class("row"))
+            .child(div().id("alice").class("row"))
+            .child(div().id("bob").class("row").class("row--active"));
+        assert_eq!(
+            tree.incremental_update(&updated),
+            UpdateResult::ChildrenChanged
+        );
+
+        assert_eq!(tree.layout_tree.children(root)[2], bob);
+        let index = tree.element_registry.class_to_nodes_index();
+        assert_eq!(index.get("row--active"), Some(&vec![bob]));
+    }
+
+    #[test]
     fn stale_subtree_rebuilds_are_dropped_after_parent_rebuild() {
         // Serialize against other tests that touch the global
         // PENDING_SUBTREE_REBUILDS queue. Without this, slotmap

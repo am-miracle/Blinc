@@ -122,21 +122,29 @@ impl RenderTree {
             }
         }
 
-        let can_preserve_keyed_survivor = new_children.iter().any(|child| {
-            let Some(key) = child.element_id() else {
-                return false;
-            };
-            if new_key_counts.get(key) != Some(&1) || old_key_counts.get(key) != Some(&1) {
-                return false;
-            }
-            let Some(&old_id) = old_by_key.get(key) else {
-                return false;
-            };
-            let new_topology = DivHash::compute_topology_tree(child.as_ref());
-            self.node_hashes
-                .get(&old_id)
-                .is_some_and(|&(_, _, old_topology)| old_topology == new_topology)
-        });
+        let new_topologies: Vec<DivHash> = new_children
+            .iter()
+            .map(|child| DivHash::compute_topology_tree(child.as_ref()))
+            .collect();
+
+        let can_preserve_keyed_survivor =
+            new_children
+                .iter()
+                .zip(new_topologies.iter())
+                .any(|(child, &new_topology)| {
+                    let Some(key) = child.element_id() else {
+                        return false;
+                    };
+                    if new_key_counts.get(key) != Some(&1) || old_key_counts.get(key) != Some(&1) {
+                        return false;
+                    }
+                    let Some(&old_id) = old_by_key.get(key) else {
+                        return false;
+                    };
+                    self.node_hashes
+                        .get(&old_id)
+                        .is_some_and(|&(_, _, old_topology)| old_topology == new_topology)
+                });
         if !can_preserve_keyed_survivor {
             return false;
         }
@@ -145,13 +153,14 @@ impl RenderTree {
         let mut fresh = HashSet::new();
         let mut reconciled = Vec::with_capacity(new_children.len());
 
-        for (index, child) in new_children.iter().enumerate() {
+        for (index, (child, &new_topology)) in
+            new_children.iter().zip(new_topologies.iter()).enumerate()
+        {
             let keyed_match = child.element_id().and_then(|key| {
                 if new_key_counts.get(key) != Some(&1) || old_key_counts.get(key) != Some(&1) {
                     return None;
                 }
                 let old_id = *old_by_key.get(key)?;
-                let new_topology = DivHash::compute_topology_tree(child.as_ref());
                 self.node_hashes
                     .get(&old_id)
                     .is_some_and(|&(_, _, old_topology)| old_topology == new_topology)
@@ -165,9 +174,7 @@ impl RenderTree {
                         && self
                             .node_hashes
                             .get(old_id)
-                            .is_some_and(|&(_, _, old_topology)| {
-                                old_topology == DivHash::compute_topology_tree(child.as_ref())
-                            })
+                            .is_some_and(|&(_, _, old_topology)| old_topology == new_topology)
                 })
             } else {
                 None
@@ -494,6 +501,7 @@ impl RenderTree {
             new_props.node_id = Some(node_id);
             new_props.motion = render_node.props.motion.clone();
             render_node.props = new_props;
+            render_node.element_type = Self::determine_element_type_boxed(element);
         } else {
             // Render node doesn't exist - this can happen if the tree structure changed
             // but rebuild_children_in_place wasn't called for this subtree.
@@ -518,6 +526,19 @@ impl RenderTree {
         // This is critical for layout changes (width, height, padding, etc.)
         if let Some(style) = element.layout_style() {
             self.layout_tree.set_style(node_id, style.clone());
+        }
+
+        let new_classes = element.element_classes();
+        let old_classes = self.element_registry.get_classes(node_id);
+        let classes_changed = new_classes != old_classes.as_deref().unwrap_or(&[]);
+        if !new_classes.is_empty() {
+            self.element_registry
+                .register_classes(node_id, new_classes.to_vec());
+        } else {
+            self.element_registry.clear_classes(node_id);
+        }
+        if classes_changed {
+            self.base_styles.remove(&node_id);
         }
 
         let own_hash = DivHash::compute_element(element);
